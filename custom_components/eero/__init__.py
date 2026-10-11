@@ -614,7 +614,7 @@ class EeroEntity(CoordinatorEntity):
             if self.suffix_connection_type:
                 name = self.resource.name_connection_type
 
-        entry_type, suggested_area, sw_version, hw_version, via_device = (
+        entry_type, suggested_area, sw_version, hw_version, via_device_id = (
             None,
             None,
             None,
@@ -641,9 +641,9 @@ class EeroEntity(CoordinatorEntity):
                 self.resource.is_client,
             ]
         ):
-            via_device = (DOMAIN, self.network.id)
+            via_device_id = self._network_device_id()
 
-        return dr.DeviceInfo(
+        device_info = dr.DeviceInfo(
             entry_type=entry_type,
             hw_version=hw_version,
             identifiers={(DOMAIN, self.resource.id)},
@@ -652,8 +652,27 @@ class EeroEntity(CoordinatorEntity):
             name=name,
             suggested_area=suggested_area,
             sw_version=sw_version,
-            via_device=via_device,
         )
+        # `via_device` (an identifier tuple) is deprecated in Home Assistant
+        # and raises for some platforms (image). Link to the network device
+        # by its device registry id instead. Leave the key out when the
+        # network device is not registered: None would clear an existing link.
+        if via_device_id:
+            device_info["via_device_id"] = via_device_id
+        return device_info
+
+    def _network_device_id(self) -> str | None:
+        """Return the device registry id of this entity's network device.
+
+        async_setup_entry registers the network device before the platforms
+        are set up, so it exists by the time entities are added.
+        """
+        if self.hass is None or self.network is None:
+            return None
+        device = dr.async_get(self.hass).async_get_device(
+            identifiers={(DOMAIN, self.network.id)}
+        )
+        return device.id if device else None
 
     @property
     def name(self) -> str:
