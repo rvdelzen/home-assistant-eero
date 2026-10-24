@@ -43,6 +43,18 @@ ACTIVITIES_DATA_USAGE_PREMIUM = [
 ]
 
 ATTR_BLOCKED_APPS = "blocked_apps"
+ATTR_CLIENT_PORT = "client_port"
+ATTR_CONFIG_ENTRY_ID = "config_entry_id"
+ATTR_DESCRIPTION = "description"
+ATTR_DRY_RUN = "dry_run"
+ATTR_ENABLED = "enabled"
+ATTR_FORWARD_ID = "forward_id"
+ATTR_GATEWAY_PORT = "gateway_port"
+ATTR_IP = "ip"
+ATTR_MAC = "mac"
+ATTR_NETWORK = "network"
+ATTR_PROTOCOL = "protocol"
+ATTR_RESERVATION_ID = "reservation_id"
 ATTR_TARGET_NETWORK = "target_network"
 ATTR_TARGET_PROFILE = "target_profile"
 
@@ -70,6 +82,7 @@ CONF_WIRELESS_CLIENTS_FILTER = "wireless_clients_filter"
 
 DATA_API = "api"
 DATA_COORDINATOR = "coordinator"
+DATA_RELOAD_SIGNATURE = "reload_signature"
 DATA_UPDATE_LISTENER = "update_listener"
 
 DOMAIN = "eero"
@@ -87,7 +100,14 @@ RELEASE_URL = (
     "https://support.eero.com/hc/en-us/articles/209636523-eero-Software-Release-Notes"
 )
 
+SERVICE_CREATE_PORT_FORWARD = "create_port_forward"
+SERVICE_CREATE_RESERVATION = "create_reservation"
+SERVICE_DELETE_PORT_FORWARD = "delete_port_forward"
+SERVICE_DELETE_RESERVATION = "delete_reservation"
+SERVICE_LIST_PORT_FORWARDS = "list_port_forwards"
+SERVICE_LIST_RESERVATIONS = "list_reservations"
 SERVICE_SET_BLOCKED_APPS = "set_blocked_apps"
+SERVICE_UPDATE_RESERVATION = "update_reservation"
 
 CONF_MISCELLANEOUS = "miscellaneous"
 CONF_PREFIX_NETWORK_NAME = "prefix_network_name"

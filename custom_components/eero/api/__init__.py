@@ -7,6 +7,7 @@ import datetime
 import json
 import logging
 from pathlib import Path
+import re
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -35,6 +36,51 @@ from .util import backup_access_point_ok, premium_ok
 
 _LOGGER = logging.getLogger(__name__)
 
+_QUOTED_SECRET = re.compile(
+    r'("(?:user_token|login|code)"\s*:\s*")[^"]*"',
+    re.IGNORECASE,
+)
+
+
+def redact_login(login: str | int) -> str:
+    """Return a log-safe hint for an email address or phone number."""
+    text = str(login).strip()
+    if "@" in text:
+        local, _, domain = text.partition("@")
+        prefix = local[:1]
+        return f"{prefix}***@{domain}"
+    digits = "".join(character for character in text if character.isdigit())
+    if len(digits) >= 2:
+        return f"***{digits[-2:]}"
+    return "***"
+
+
+def redact_secrets(value: str | None, token: str | None = None) -> str | None:
+    """Remove session tokens, logins, and verification codes from text."""
+    if not value:
+        return value
+    redacted = _QUOTED_SECRET.sub(r'\1***"', value)
+    if token:
+        redacted = redacted.replace(token, "***")
+    return redacted
+
+
+def redact_data(value: Any, token: str | None = None) -> Any:
+    """Return a copy of API data safe to write to disk."""
+    if isinstance(value, dict):
+        redacted = {}
+        for key, item in value.items():
+            if key in {"user_token", "login", "code"} and isinstance(item, str):
+                redacted[key] = "***"
+            else:
+                redacted[key] = redact_data(item, token)
+        return redacted
+    if isinstance(value, list):
+        return [redact_data(item, token) for item in value]
+    if isinstance(value, str):
+        return redact_secrets(value, token)
+    return value
+
 
 class EeroException(Exception):
     """EeroException."""
@@ -62,10 +108,14 @@ class EeroException(Exception):
         if self.message:
             exception = f"{exception}\n- Message: {self.message}"
         if self.payload:
-            exception = f"{exception}\n- Payload: {self.payload}"
+            exception = f"{exception}\n- Payload: {redact_secrets(self.payload)}"
         if self.server_time:
             exception = f"{exception}\n- Server time: {self.server_time}"
         _LOGGER.warning(exception)
+
+
+class EeroAuthException(EeroException):
+    """The session was rejected and could not be refreshed."""
 
 
 class EeroAPI:
@@ -76,6 +126,8 @@ class EeroAPI:
         save_location: str | None = None,
         show_eero_logo: dict[str, bool] | None = None,
         user_token: str | None = None,
+        on_user_token: Callable[[str], None] | None = None,
+        on_auth_failed: Callable[[], None] | None = None,
     ) -> None:
         """Initialize."""
         self.data = EeroAccount(self, {})
@@ -84,8 +136,46 @@ class EeroAPI:
         self.session = requests.Session()
         self.show_eero_logo = show_eero_logo
         self.user_token = user_token
+        self._on_user_token = on_user_token
+        self._on_auth_failed = on_auth_failed
+        self._refresh_in_progress = False
         if self.show_eero_logo is None:
             self.show_eero_logo = {}
+
+    def _set_user_token(self, token: str | None) -> None:
+        """Store a session token and tell the integration when it changes."""
+        if not token or token == self.user_token:
+            return
+        self.user_token = token
+        if self._on_user_token is not None:
+            self._on_user_token(token)
+
+    def _notify_auth_failed(self) -> None:
+        """Ask Home Assistant to start reauthentication."""
+        if self._on_auth_failed is not None:
+            self._on_auth_failed()
+
+    @staticmethod
+    def _session_rejected(text: Any) -> bool:
+        """Return True when the payload says the session cookie was rejected."""
+        if not isinstance(text, dict):
+            return False
+        meta = text.get("meta")
+        if not isinstance(meta, dict):
+            return False
+        return meta.get("code") == 401 and meta.get("error") in {
+            "error.session.invalid",
+            "error.session.refresh",
+        }
+
+    def _http_error(self, response: requests.Response) -> EeroException:
+        """Build an exception for a non-success response."""
+        return EeroException(
+            code=response.status_code,
+            error=response.reason,
+            message=f"Bad response received from URL: {response.url}",
+            payload=redact_secrets(response.text, self.user_token),
+        )
 
     @property
     def cookie(self) -> dict:
@@ -94,36 +184,34 @@ class EeroAPI:
             return {"s": self.user_token}
         return {}
 
-    def call(self, method: str, url: str, **kwargs) -> dict[str, Any]:
-        """Call."""
+    def call(
+        self, method: str, url: str, **kwargs
+    ) -> dict[str, Any] | list[Any] | None:
+        """Call.
+
+        ``allow_refresh`` is consumed here and is not sent to the API.
+        Writes pass ``allow_refresh=False`` so a failed request is not repeated.
+        """
+        allow_refresh = kwargs.pop("allow_refresh", True)
         if method not in [METHOD_DELETE, METHOD_GET, METHOD_POST, METHOD_PUT]:
             return None
         _LOGGER.debug("Calling API with method: %s and URL: %s", method, url)
-        if method == METHOD_DELETE:
-            response = self.parse_response(
-                lambda: self.session.delete(
-                    url=f"{API_ENDPOINT}{url}", cookies=self.cookie, **kwargs
-                )
-            )
-        elif method == METHOD_GET:
-            response = self.parse_response(
-                lambda: self.session.get(
-                    url=f"{API_ENDPOINT}{url}", cookies=self.cookie, **kwargs
-                )
-            )
-        elif method == METHOD_POST:
-            response = self.parse_response(
-                lambda: self.session.post(
-                    url=f"{API_ENDPOINT}{url}", cookies=self.cookie, **kwargs
-                )
-            )
-        elif method == METHOD_PUT:
-            response = self.parse_response(
-                lambda: self.session.put(
-                    url=f"{API_ENDPOINT}{url}", cookies=self.cookie, **kwargs
-                )
-            )
-        self.save_response(response=response, name=url)
+        requester = {
+            METHOD_DELETE: self.session.delete,
+            METHOD_GET: self.session.get,
+            METHOD_POST: self.session.post,
+            METHOD_PUT: self.session.put,
+        }[method]
+        response = self.parse_response(
+            lambda: requester(
+                url=f"{API_ENDPOINT}{url}", cookies=self.cookie, **kwargs
+            ),
+            allow_refresh=allow_refresh,
+        )
+        self.save_response(
+            response=redact_data(response, self.user_token),
+            name=url,
+        )
         return response
 
     def define_period(self, period: str, timezone: str) -> tuple:
@@ -184,13 +272,14 @@ class EeroAPI:
 
     def login(self, login: str | int) -> dict[str, Any]:
         """Login."""
-        _LOGGER.debug("Using login: %s", login)
+        _LOGGER.debug("Starting login for %s", redact_login(login))
         response = self.call(
             method=METHOD_POST,
             url="/2.2/login",
             json={"login": login},
+            allow_refresh=False,
         )
-        self.user_token = response["user_token"]
+        self._set_user_token(response["user_token"])
         return response
 
     def login_refresh(self) -> dict[str, Any]:
@@ -199,18 +288,26 @@ class EeroAPI:
         response = self.call(
             method=METHOD_POST,
             url="/2.2/login/refresh",
+            allow_refresh=False,
         )
-        self.user_token = response["user_token"]
+        token = response.get("user_token") if isinstance(response, dict) else None
+        if not token:
+            raise EeroAuthException(message="Session refresh did not return a token")
+        self._set_user_token(token)
         return response
 
     def login_verify(self, code: str) -> dict[str, Any]:
         """Login verify."""
-        _LOGGER.debug("Verifying login with code: %s", code)
-        return self.call(
+        _LOGGER.debug("Verifying login code")
+        response = self.call(
             method=METHOD_POST,
             url="/2.2/login/verify",
             json={"code": code},
+            allow_refresh=False,
         )
+        if isinstance(response, dict) and response.get("user_token"):
+            self._set_user_token(response["user_token"])
+        return response
 
     def decode_json(self, response: requests.Response) -> dict[str, Any]:
         """Decode JSON."""
@@ -221,37 +318,64 @@ class EeroAPI:
                 code=response.status_code,
                 error=response.reason,
                 message="Unable to decode JSON",
-                payload=response.text,
+                payload=redact_secrets(response.text, self.user_token),
             ) from exception
 
-    def parse_response(self, function: Callable) -> dict[str, Any]:
-        """Parse response."""
+    def parse_response(
+        self, function: Callable, allow_refresh: bool = True
+    ) -> dict[str, Any] | list[Any] | None:
+        """Parse response.
+
+        A rejected session is refreshed once and the original request is retried
+        once. The refresh request itself, and callers that pass
+        ``allow_refresh=False``, are never retried.
+        """
         response = self.timeout(function)
         if not response.ok:
             text = self.decode_json(response)
-            meta = text.get("meta", {})
-            code, error = meta.get("code"), meta.get("error")
-            if all(
-                [
-                    code == 401,
-                    any(
-                        [
-                            error == "error.session.invalid",
-                            error == "error.session.refresh",
-                        ]
-                    ),
-                ]
-            ):
+            if self._session_rejected(text):
                 _LOGGER.debug("Session has expired and is invalid")
-                self.login_refresh()
-                response = self.timeout(function)
+                if allow_refresh and not self._refresh_in_progress:
+                    self._refresh_in_progress = True
+                    try:
+                        self.login_refresh()
+                    except EeroException as err:
+                        self._notify_auth_failed()
+                        if isinstance(err, EeroAuthException):
+                            raise
+                        raise EeroAuthException(
+                            code=err.code,
+                            error=err.error,
+                            message="Session refresh failed",
+                        ) from err
+                    finally:
+                        self._refresh_in_progress = False
+                    response = self.timeout(function)
+                    if not response.ok:
+                        text = self.decode_json(response)
+                        if self._session_rejected(text):
+                            self._notify_auth_failed()
+                            raise EeroAuthException(
+                                code=response.status_code,
+                                error=response.reason,
+                                message="Session rejected after refresh",
+                                payload=redact_secrets(response.text, self.user_token),
+                            )
+                        raise self._http_error(response)
+                else:
+                    # The refresh request runs with a refresh already in
+                    # progress. Only the outer caller reports auth failure,
+                    # so a rejected refresh notifies Home Assistant once.
+                    if not self._refresh_in_progress:
+                        self._notify_auth_failed()
+                    raise EeroAuthException(
+                        code=response.status_code,
+                        error=response.reason,
+                        message="Session rejected",
+                        payload=redact_secrets(response.text, self.user_token),
+                    )
             else:
-                raise EeroException(
-                    code=response.status_code,
-                    error=response.reason,
-                    message=f"Bad response received from URL: {response.url}",
-                    payload=response.text,
-                )
+                raise self._http_error(response)
         text = self.decode_json(response)
         return text.get("data")
 
@@ -264,7 +388,7 @@ class EeroAPI:
                 message="Request timed out",
             ) from exception
 
-    def save_response(self, response: dict[str, Any] | None, name="response") -> None:
+    def save_response(self, response: Any, name: str = "response") -> None:
         """Save response."""
         if self.save_location and response:
             if not Path(self.save_location).is_dir():
@@ -405,8 +529,10 @@ class EeroAPI:
                     network_data["activity"] = activity_data
                     networks.append(network_data)
             account["networks"]["data"] = networks
-            self.save_response(response=account, name="update_data")
+            self.save_response(response=redact_data(account, self.user_token), name="update_data")
             self.data = EeroAccount(self, account)
+        except EeroAuthException:
+            raise
         except EeroException:
             return self.data
         return self.data
