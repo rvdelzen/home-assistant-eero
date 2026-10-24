@@ -1,12 +1,243 @@
-
 set_blocked_apps:
   fields:
     blocked_apps:
-      required: True
+      required: true
       example: netflix
+      selector:
+        text:
     target_profile:
-      required: False
+      required: false
       example: John Doe or 1234567
+      selector:
+        text:
     target_network:
-      required: False
-      example: My Network or 1234567    
+      required: false
+      example: My Network or 1234567
+      selector:
+        text:
+
+list_reservations:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: eero
+    network:
+      required: false
+      example: My Network
+      selector:
+        text:
+
+create_reservation:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: eero
+    network:
+      required: false
+      example: My Network
+      selector:
+        text:
+    mac:
+      required: true
+      example: "aa:bb:cc:dd:ee:ff"
+      selector:
+        text:
+    ip:
+      required: true
+      example: "192.168.4.50"
+      selector:
+        text:
+    description:
+      required: true
+      example: Printer
+      selector:
+        text:
+    dry_run:
+      required: false
+      default: false
+      selector:
+        boolean:
+
+update_reservation:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: eero
+    network:
+      required: false
+      example: My Network
+      selector:
+        text:
+    reservation_id:
+      required: false
+      example: "12345678"
+      selector:
+        text:
+    mac:
+      required: false
+      example: "aa:bb:cc:dd:ee:ff"
+      selector:
+        text:
+    ip:
+      required: false
+      example: "192.168.4.51"
+      selector:
+        text:
+    description:
+      required: false
+      example: Printer
+      selector:
+        text:
+    dry_run:
+      required: false
+      default: false
+      selector:
+        boolean:
+
+delete_reservation:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: eero
+    network:
+      required: false
+      example: My Network
+      selector:
+        text:
+    reservation_id:
+      required: false
+      example: "12345678"
+      selector:
+        text:
+    mac:
+      required: false
+      example: "aa:bb:cc:dd:ee:ff"
+      selector:
+        text:
+    dry_run:
+      required: false
+      default: false
+      selector:
+        boolean:
+
+list_port_forwards:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: eero
+    network:
+      required: false
+      example: My Network
+      selector:
+        text:
+
+create_port_forward:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: eero
+    network:
+      required: false
+      example: My Network
+      selector:
+        text:
+    ip:
+      required: true
+      example: "192.168.4.50"
+      selector:
+        text:
+    client_port:
+      required: true
+      example: 80
+      selector:
+        number:
+          min: 1
+          max: 65535
+          mode: box
+    gateway_port:
+      required: true
+      example: 8080
+      selector:
+        number:
+          min: 1
+          max: 65535
+          mode: box
+    protocol:
+      required: true
+      example: tcp
+      selector:
+        select:
+          options:
+            - tcp
+            - udp
+    description:
+      required: false
+      example: Camera
+      selector:
+        text:
+    enabled:
+      required: false
+      default: true
+      selector:
+        boolean:
+    dry_run:
+      required: false
+      default: false
+      selector:
+        boolean:
+
+delete_port_forward:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: eero
+    network:
+      required: false
+      example: My Network
+      selector:
+        text:
+    forward_id:
+      required: false
+      example: "12345678"
+      selector:
+        text:
+    ip:
+      required: false
+      example: "192.168.4.50"
+      selector:
+        text:
+    gateway_port:
+      required: false
+      example: 8080
+      selector:
+        number:
+          min: 1
+          max: 65535
+          mode: box
+    protocol:
+      required: false
+      example: tcp
+      selector:
+        select:
+          options:
+            - tcp
+            - udp
+    dry_run:
+      required: false
+      default: false
+      selector:
+        boolean:

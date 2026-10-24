@@ -34,6 +34,74 @@ Custom component to allow control of Eero networks in [Home Assistant](https://h
 - Set blocked apps for profiles (requires Eero Plus subscription)
 - Update entities for Eero device firmware management
 - Control backup networks (requires Eero Plus subscription)
+- List, create, update, and delete DHCP reservations
+- List, create, and delete port forwards
+- Switch the Eero account on an existing config entry (reconfigure) and sign in again when the session expires (reauthentication)
+
+## Services
+Service responses are JSON objects. In Developer Tools, enable **return response** on the action. In a script or automation, set `response_variable`.
+
+`config_entry_id` is the id of the Eero config entry (Settings → Devices & services → Eero → the entry menu shows it, and the config-entry selector lists the entry). `network` is optional and accepts a network id or name. When it is omitted, the entry's only network is used, or the first configured network when there are several.
+
+Write actions read the current list, change one record, then read the list again. They return `before`, `after`, `changed`, and `dry_run`. A conflicting IP address or MAC address, or a missing target, is refused before anything is written. `dry_run: true` returns the planned change and does not call the write endpoint. A failed write is not retried. Deleting a reservation always sends `delete_forwards=false`, so port forwards are kept.
+
+### List DHCP reservations
+
+```yaml
+action: eero.list_reservations
+data:
+  config_entry_id: YOUR_CONFIG_ENTRY_ID
+response_variable: reservations
+```
+
+`reservations.reservations` is a list of `{id, ip, mac, description}`.
+
+### Create a reservation
+
+```yaml
+action: eero.create_reservation
+data:
+  config_entry_id: YOUR_CONFIG_ENTRY_ID
+  mac: "aa:bb:cc:dd:ee:ff"
+  ip: "192.168.4.50"
+  description: Printer
+  dry_run: true
+response_variable: reservation
+```
+
+Set `dry_run` to `false` to create it. Update with `eero.update_reservation` (`reservation_id` or `mac`, plus a new `ip` and/or `description`). Delete with `eero.delete_reservation` (`reservation_id` or `mac`).
+
+### List port forwards
+
+```yaml
+action: eero.list_port_forwards
+data:
+  config_entry_id: YOUR_CONFIG_ENTRY_ID
+response_variable: forwards
+```
+
+Each item has `id`, `ip`, `client_port`, `gateway_port`, `protocol` (`tcp` or `udp`), `description`, and `enabled`.
+
+### Create a port forward
+
+```yaml
+action: eero.create_port_forward
+data:
+  config_entry_id: YOUR_CONFIG_ENTRY_ID
+  ip: "192.168.4.50"
+  client_port: 80
+  gateway_port: 8080
+  protocol: tcp
+  description: Camera
+  enabled: true
+  dry_run: true
+response_variable: forward
+```
+
+Delete with `eero.delete_port_forward`, passing `forward_id` or `ip`, `gateway_port`, and `protocol`.
+
+### Reconfigure and reauthentication
+Use **Reconfigure** on the config entry to sign the same entry into a different Eero account (email or phone, then the verification code). The entry id, devices, and entity ids stay the same. When a saved session is rejected and refresh fails, Home Assistant starts the reauthentication flow for that same entry. An account that is already set up on another entry is refused.
 
 ## Coming Soon
 - TBD, feature requests are welcome.

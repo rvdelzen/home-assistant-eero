@@ -541,6 +541,174 @@ class EeroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    def _account_entry(self):
+        """Return the config entry being reauthenticated or reconfigured."""
+        if self.source == config_entries.SOURCE_RECONFIGURE:
+            return self._get_reconfigure_entry()
+        return self._get_reauth_entry()
+
+    def _login_schema(self, default: str | None) -> vol.Schema:
+        """Schema for an email address or phone number."""
+        return vol.Schema(
+            {
+                vol.Required(CONF_LOGIN, default=default): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.TEXT)
+                ),
+            }
+        )
+
+    def _code_schema(self) -> vol.Schema:
+        """Schema for a verification code typed by the user."""
+        return vol.Schema(
+            {
+                vol.Required(CONF_CODE): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.NUMBER)
+                ),
+            }
+        )
+
+    async def _async_request_code(self, login: str) -> None:
+        """Send a verification code without logging the account identifier."""
+        self.api = EeroAPI()
+        self.response = await self.hass.async_add_executor_job(self.api.login, login)
+        self.user_input[CONF_LOGIN] = login
+        self.user_input[CONF_USER_TOKEN] = self.response["user_token"]
+
+    async def _async_verify_code(self, code: str) -> None:
+        """Verify a code typed by the user. The code is not logged."""
+        self.response = await self.hass.async_add_executor_job(
+            self.api.login_verify, code
+        )
+        if isinstance(self.response, dict) and self.response.get("user_token"):
+            self.user_input[CONF_USER_TOKEN] = self.response["user_token"]
+
+    async def _async_finish_account_link(self):
+        """Store the verified account on the existing config entry."""
+        entry = self._account_entry()
+        log_id = str(self.response["log_id"]).lower()
+        await self.async_set_unique_id(log_id)
+        existing = self.hass.config_entries.async_entry_for_domain_unique_id(
+            DOMAIN, log_id
+        )
+        if existing is not None and existing.entry_id != entry.entry_id:
+            return self.async_abort(reason="already_configured")
+        name = self.response.get("name") or entry.data.get(CONF_NAME, "")
+        login = self.user_input[CONF_LOGIN]
+        token = self.api.user_token or self.user_input.get(CONF_USER_TOKEN)
+        updates = {
+            "data_updates": {
+                CONF_LOGIN: login,
+                CONF_USER_TOKEN: token,
+                CONF_NAME: name,
+            },
+            "unique_id": log_id,
+            "title": f"{name} ({login})",
+        }
+        # A loaded entry already reloads from its update listener. Scheduling
+        # another reload is rejected by Home Assistant 2026.12 when listeners
+        # exist. Older cores only have the reload helper.
+        if entry.update_listeners and hasattr(self, "async_update_and_abort"):
+            return self.async_update_and_abort(entry, **updates)
+        return self.async_update_reload_and_abort(entry, **updates)
+
+    async def async_step_reconfigure(self, user_input=None):
+        """Switch this entry to another Eero account, keeping its id."""
+        return await self.async_step_reconfigure_login(user_input)
+
+    async def async_step_reconfigure_login(self, user_input=None):
+        """Ask for the email address or phone number of the account to use."""
+        errors = {}
+        entry = self._get_reconfigure_entry()
+        if user_input:
+            try:
+                await self._async_request_code(user_input[CONF_LOGIN])
+            except EeroException as exception:
+                _LOGGER.error(
+                    "Status: %s, Error Message: %s", exception.code, exception.error
+                )
+                errors["base"] = "invalid_login"
+            else:
+                return self.async_show_form(
+                    step_id="reconfigure_verify",
+                    data_schema=self._code_schema(),
+                    description_placeholders={"login": self.user_input[CONF_LOGIN]},
+                )
+        return self.async_show_form(
+            step_id="reconfigure_login",
+            data_schema=self._login_schema(entry.data.get(CONF_LOGIN)),
+            errors=errors,
+        )
+
+    async def async_step_reconfigure_verify(self, user_input=None):
+        """Verify the account and update this config entry in place."""
+        errors = {}
+        if user_input:
+            try:
+                await self._async_verify_code(user_input[CONF_CODE])
+            except EeroException as exception:
+                _LOGGER.error(
+                    "Status: %s, Error Message: %s", exception.code, exception.error
+                )
+                errors["base"] = "invalid_code"
+            else:
+                return await self._async_finish_account_link()
+        return self.async_show_form(
+            step_id="reconfigure_verify",
+            data_schema=self._code_schema(),
+            description_placeholders={"login": self.user_input.get(CONF_LOGIN, "")},
+            errors=errors,
+        )
+
+    async def async_step_reauth(self, entry_data):
+        """Start reauthentication when the session is rejected."""
+        if entry_data.get(CONF_LOGIN):
+            self.user_input[CONF_LOGIN] = entry_data[CONF_LOGIN]
+        return await self.async_step_reauth_login()
+
+    async def async_step_reauth_login(self, user_input=None):
+        """Send a verification code for the account on this entry."""
+        errors = {}
+        entry = self._get_reauth_entry()
+        if user_input:
+            try:
+                await self._async_request_code(user_input[CONF_LOGIN])
+            except EeroException as exception:
+                _LOGGER.error(
+                    "Status: %s, Error Message: %s", exception.code, exception.error
+                )
+                errors["base"] = "invalid_login"
+            else:
+                return self.async_show_form(
+                    step_id="reauth_verify",
+                    data_schema=self._code_schema(),
+                    description_placeholders={"login": self.user_input[CONF_LOGIN]},
+                )
+        return self.async_show_form(
+            step_id="reauth_login",
+            data_schema=self._login_schema(entry.data.get(CONF_LOGIN)),
+            errors=errors,
+        )
+
+    async def async_step_reauth_verify(self, user_input=None):
+        """Store a new session token on the existing config entry."""
+        errors = {}
+        if user_input:
+            try:
+                await self._async_verify_code(user_input[CONF_CODE])
+            except EeroException as exception:
+                _LOGGER.error(
+                    "Status: %s, Error Message: %s", exception.code, exception.error
+                )
+                errors["base"] = "invalid_code"
+            else:
+                return await self._async_finish_account_link()
+        return self.async_show_form(
+            step_id="reauth_verify",
+            data_schema=self._code_schema(),
+            description_placeholders={"login": self.user_input.get(CONF_LOGIN, "")},
+            errors=errors,
+        )
+
     @staticmethod
     @callback
     def async_get_options_flow(config_entry):

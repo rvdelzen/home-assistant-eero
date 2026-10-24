@@ -8,6 +8,7 @@ of the upstream entry.
 
 | Version | Change | Upstream |
 |---|---|---|
+| 1.9.0 | DHCP reservation services (`list`, `create`, `update`, `delete`), port-forward services (`list`, `create`, `delete`), config-entry reconfigure (switch Eero account without a new entry id) and reauthentication, and persistence of a refreshed session token back into the config entry. | — |
 | 1.8.1.1 | `EeroEntity.device_info` links child devices to the network device with `via_device_id` (device registry id) instead of the deprecated `via_device` identifier tuple. On Home Assistant 2026.10 the tuple logs a deprecation warning on every platform and raises for `image` (`Error adding entity None for domain image with platform eero`, so `image.ohana_qr_code` was never added). Breaks in 2027.8 otherwise. | [#180](https://github.com/schmittx/home-assistant-eero/issues/180) |
 
 All platforms (binary_sensor, button, device_tracker, image, light, number,

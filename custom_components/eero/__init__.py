@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from asyncio import timeout
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
+import json
 import logging
 from typing import Any
 
@@ -14,6 +16,7 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME, CONF_SCAN_INTERVAL, Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import (
     config_validation as cv,
     device_registry as dr,
@@ -26,7 +29,7 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 
-from .api import EeroAPI, EeroException, EeroUpdateConfig
+from .api import EeroAPI, EeroAuthException, EeroException, EeroUpdateConfig
 from .api.const import SUPPORTED_APPS
 from .api.network import EeroNetwork
 from .api.resource import EeroResource
@@ -62,6 +65,7 @@ from .const import (
     CONF_WIRELESS_CLIENTS_FILTER,
     DATA_API,
     DATA_COORDINATOR,
+    DATA_RELOAD_SIGNATURE,
     DATA_UPDATE_LISTENER,
     DEFAULT_CONSIDER_HOME,
     DEFAULT_PREFIX_NETWORK_NAME,
@@ -82,6 +86,7 @@ from .const import (
     MODEL_PROFILE,
     SERVICE_SET_BLOCKED_APPS,
 )
+from .services import async_register_services, async_unload_services
 
 SET_BLOCKED_APPS_SCHEMA = vol.Schema(
     {
@@ -112,6 +117,76 @@ PLATFORMS = [
 ]
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _jsonable(value: Any) -> Any:
+    """Return a JSON-ready copy of config entry data."""
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def _reload_signature(config_entry: ConfigEntry) -> str:
+    """Identify entry changes other than a refreshed session token."""
+    data = {
+        key: value
+        for key, value in config_entry.data.items()
+        if key != CONF_USER_TOKEN
+    }
+    payload = {
+        "data": _jsonable(data),
+        "options": _jsonable(config_entry.options),
+        "title": config_entry.title,
+        "unique_id": config_entry.unique_id,
+    }
+    return json.dumps(payload, sort_keys=True, default=str)
+
+
+def _run_on_hass_loop(hass: HomeAssistant, func: Callable[[], None]) -> None:
+    """Run a callback on the Home Assistant loop, including from a worker thread."""
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    if running is hass.loop:
+        func()
+    else:
+        hass.loop.call_soon_threadsafe(func)
+
+
+def create_eero_api(
+    hass: HomeAssistant, config_entry: ConfigEntry, **kwargs: Any
+) -> EeroAPI:
+    """Return an API client that stores renewed tokens and starts reauth."""
+
+    def _on_user_token(token: str) -> None:
+        def _save() -> None:
+            if hass.config_entries.async_get_entry(config_entry.entry_id) is None:
+                return
+            if config_entry.data.get(CONF_USER_TOKEN) == token:
+                return
+            hass.config_entries.async_update_entry(
+                config_entry,
+                data={**config_entry.data, CONF_USER_TOKEN: token},
+            )
+
+        _run_on_hass_loop(hass, _save)
+
+    def _on_auth_failed() -> None:
+        def _start() -> None:
+            if hass.config_entries.async_get_entry(config_entry.entry_id) is None:
+                return
+            config_entry.async_start_reauth(hass)
+
+        _run_on_hass_loop(hass, _start)
+
+    return EeroAPI(
+        on_user_token=_on_user_token,
+        on_auth_failed=_on_auth_failed,
+        **kwargs,
+    )
 
 
 async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
@@ -383,7 +458,9 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                         )
                         entity_registry.async_remove(entity_entry.entity_id)
 
-    api = EeroAPI(
+    api = create_eero_api(
+        hass,
+        config_entry,
         save_location=DEFAULT_SAVE_LOCATION if conf_save_responses else None,
         show_eero_logo={
             network_id: miscellaneous[CONF_SHOW_EERO_LOGO]
@@ -429,17 +506,22 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
         try:
             async with timeout(conf_timeout):
                 return await hass.async_add_executor_job(api.update, conf_update)
+        except EeroAuthException as error:
+            raise ConfigEntryAuthFailed("Eero session rejected") from error
         except EeroException as error:
             raise UpdateFailed("Error communicating with API") from error
 
     coordinator = DataUpdateCoordinator(
         hass=hass,
         logger=_LOGGER,
+        config_entry=config_entry,
         name=f"Eero ({data[CONF_NAME]})",
         update_method=async_update_data,
         update_interval=timedelta(seconds=conf_scan_interval),
     )
     await coordinator.async_refresh()
+    if isinstance(coordinator.last_exception, ConfigEntryAuthFailed):
+        raise coordinator.last_exception
 
     for network in coordinator.data.networks:
         if conf_miscellaneous_network := conf_miscellaneous.get(network.id):
@@ -462,6 +544,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
         CONF_RESOURCES: conf_resources,
         DATA_API: api,
         DATA_COORDINATOR: coordinator,
+        DATA_RELOAD_SIGNATURE: _reload_signature(config_entry),
         DATA_UPDATE_LISTENER: config_entry.add_update_listener(async_update_listener),
     }
 
@@ -527,6 +610,8 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                 model=MODEL_NETWORK,
             )
 
+    async_register_services(hass)
+
     await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
 
     return True
@@ -540,12 +625,26 @@ async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> 
     if unload_ok:
         hass.data[DOMAIN][config_entry.entry_id][DATA_UPDATE_LISTENER]()
         hass.data[DOMAIN].pop(config_entry.entry_id)
+        if not hass.data[DOMAIN]:
+            async_unload_services(hass)
 
     return unload_ok
 
 
 async def async_update_listener(hass: HomeAssistant, config_entry: ConfigEntry) -> None:
-    """Handle options update."""
+    """Reload when options change, but keep entities up when only the token changes."""
+    runtime = hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
+    if runtime is not None:
+        signature = _reload_signature(config_entry)
+        stored = runtime.get(DATA_RELOAD_SIGNATURE)
+        if stored is None or stored == signature:
+            api = runtime.get(DATA_API)
+            token = config_entry.data.get(CONF_USER_TOKEN)
+            if api is not None and token:
+                api.user_token = token
+            if stored == signature:
+                runtime[DATA_RELOAD_SIGNATURE] = signature
+            return
     await hass.config_entries.async_reload(config_entry.entry_id)
 
 

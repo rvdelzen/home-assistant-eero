@@ -1,7 +1,10 @@
 {
     "config": {
         "abort": {
-            "already_configured": "The desired network is already configured"
+            "already_configured": "This Eero account is already configured",
+            "already_in_progress": "This Eero account is already being configured",
+            "reauth_successful": "Reauthentication successful. Devices and entities were kept.",
+            "reconfigure_successful": "Account updated. The existing entry, devices, and entities were kept."
         },
         "error": {
             "invalid_code": "Invalid code",
@@ -70,6 +73,34 @@
                     "timeout": "Polling timeout"
                 },
                 "title": "Advanced options"
+            },
+            "reconfigure_login": {
+                "data": {
+                    "login": "Login (email or SMS phone number)"
+                },
+                "description": "Enter the email address or SMS phone number (including country code) of the Eero account to use. This entry, its devices, and its entities stay the same.",
+                "title": "Switch Eero account"
+            },
+            "reconfigure_verify": {
+                "data": {
+                    "code": "Verification code"
+                },
+                "description": "Enter the verification code that was sent to {login}.",
+                "title": "Verify Eero account"
+            },
+            "reauth_login": {
+                "data": {
+                    "login": "Login (email or SMS phone number)"
+                },
+                "description": "The saved session was rejected. Enter the email address or SMS phone number for this Eero account to sign in again.",
+                "title": "Reauthenticate Eero"
+            },
+            "reauth_verify": {
+                "data": {
+                    "code": "Verification code"
+                },
+                "description": "Enter the verification code that was sent to {login}.",
+                "title": "Verify Eero account"
             }
         }
     },
@@ -146,6 +177,214 @@
                     "description": "(Optional) Name(s) or ID(s) of network(s) in which desired profile(s) are located. Defaults to all networks if not specified."
                 }
             }
+        },
+        "list_reservations": {
+            "name": "List DHCP reservations",
+            "description": "Return the DHCP reservations on a network as a list of id, ip, mac, and description.",
+            "fields": {
+                "config_entry_id": {
+                    "name": "Config entry",
+                    "description": "Eero account to query."
+                },
+                "network": {
+                    "name": "Network",
+                    "description": "Network id or name. Defaults to the entry's only network, or the first configured network."
+                }
+            }
+        },
+        "create_reservation": {
+            "name": "Create DHCP reservation",
+            "description": "Create one DHCP reservation. Refuses when the IP address or MAC address is already reserved. Set dry run to preview the change.",
+            "fields": {
+                "config_entry_id": {
+                    "name": "Config entry",
+                    "description": "Eero account to update."
+                },
+                "network": {
+                    "name": "Network",
+                    "description": "Network id or name. Defaults to the entry's only network, or the first configured network."
+                },
+                "mac": {
+                    "name": "MAC address",
+                    "description": "MAC address to reserve."
+                },
+                "ip": {
+                    "name": "IP address",
+                    "description": "IPv4 address to reserve."
+                },
+                "description": {
+                    "name": "Description",
+                    "description": "Label stored with the reservation."
+                },
+                "dry_run": {
+                    "name": "Dry run",
+                    "description": "Return the planned change without creating the reservation."
+                }
+            }
+        },
+        "update_reservation": {
+            "name": "Update DHCP reservation",
+            "description": "Update the IP address or description of one reservation, found by reservation id or MAC address.",
+            "fields": {
+                "config_entry_id": {
+                    "name": "Config entry",
+                    "description": "Eero account to update."
+                },
+                "network": {
+                    "name": "Network",
+                    "description": "Network id or name. Defaults to the entry's only network, or the first configured network."
+                },
+                "reservation_id": {
+                    "name": "Reservation id",
+                    "description": "Id of the reservation to update. Provide this or a MAC address."
+                },
+                "mac": {
+                    "name": "MAC address",
+                    "description": "MAC address of the reservation to update. Provide this or a reservation id."
+                },
+                "ip": {
+                    "name": "IP address",
+                    "description": "New IPv4 address. Omit to keep the current address."
+                },
+                "description": {
+                    "name": "Description",
+                    "description": "New label. Omit to keep the current label."
+                },
+                "dry_run": {
+                    "name": "Dry run",
+                    "description": "Return the planned change without updating the reservation."
+                }
+            }
+        },
+        "delete_reservation": {
+            "name": "Delete DHCP reservation",
+            "description": "Delete one DHCP reservation. Port forwards are kept (delete_forwards is always false).",
+            "fields": {
+                "config_entry_id": {
+                    "name": "Config entry",
+                    "description": "Eero account to update."
+                },
+                "network": {
+                    "name": "Network",
+                    "description": "Network id or name. Defaults to the entry's only network, or the first configured network."
+                },
+                "reservation_id": {
+                    "name": "Reservation id",
+                    "description": "Id of the reservation to delete. Provide this or a MAC address."
+                },
+                "mac": {
+                    "name": "MAC address",
+                    "description": "MAC address of the reservation to delete. Provide this or a reservation id."
+                },
+                "dry_run": {
+                    "name": "Dry run",
+                    "description": "Return the planned change without deleting the reservation."
+                }
+            }
+        },
+        "list_port_forwards": {
+            "name": "List port forwards",
+            "description": "Return port forwards. Each rule includes id, ip, client_port, gateway_port, protocol, description, and enabled.",
+            "fields": {
+                "config_entry_id": {
+                    "name": "Config entry",
+                    "description": "Eero account to query."
+                },
+                "network": {
+                    "name": "Network",
+                    "description": "Network id or name. Defaults to the entry's only network, or the first configured network."
+                }
+            }
+        },
+        "create_port_forward": {
+            "name": "Create port forward",
+            "description": "Create one port forward. Refuses when the gateway port and protocol, or the IP, client port, and protocol, are already in use.",
+            "fields": {
+                "config_entry_id": {
+                    "name": "Config entry",
+                    "description": "Eero account to update."
+                },
+                "network": {
+                    "name": "Network",
+                    "description": "Network id or name. Defaults to the entry's only network, or the first configured network."
+                },
+                "ip": {
+                    "name": "IP address",
+                    "description": "Internal IPv4 address that receives the forwarded traffic."
+                },
+                "client_port": {
+                    "name": "Client port",
+                    "description": "Port on the internal device."
+                },
+                "gateway_port": {
+                    "name": "Gateway port",
+                    "description": "Port opened on the gateway."
+                },
+                "protocol": {
+                    "name": "Protocol",
+                    "description": "tcp or udp."
+                },
+                "description": {
+                    "name": "Description",
+                    "description": "Label stored with the port forward."
+                },
+                "enabled": {
+                    "name": "Enabled",
+                    "description": "Whether the port forward is enabled. Defaults to on."
+                },
+                "dry_run": {
+                    "name": "Dry run",
+                    "description": "Return the planned change without creating the port forward."
+                }
+            }
+        },
+        "delete_port_forward": {
+            "name": "Delete port forward",
+            "description": "Delete one port forward by id, or by IP address, gateway port, and protocol.",
+            "fields": {
+                "config_entry_id": {
+                    "name": "Config entry",
+                    "description": "Eero account to update."
+                },
+                "network": {
+                    "name": "Network",
+                    "description": "Network id or name. Defaults to the entry's only network, or the first configured network."
+                },
+                "forward_id": {
+                    "name": "Port forward id",
+                    "description": "Id of the port forward to delete."
+                },
+                "ip": {
+                    "name": "IP address",
+                    "description": "Internal IPv4 address, used with gateway port and protocol when no id is given."
+                },
+                "gateway_port": {
+                    "name": "Gateway port",
+                    "description": "Gateway port, used with IP address and protocol when no id is given."
+                },
+                "protocol": {
+                    "name": "Protocol",
+                    "description": "tcp or udp, used with IP address and gateway port when no id is given."
+                },
+                "dry_run": {
+                    "name": "Dry run",
+                    "description": "Return the planned change without deleting the port forward."
+                }
+            }
+        }
+    },
+    "exceptions": {
+        "ip_in_use": {
+            "message": "IP address {ip} is already used by another reservation."
+        },
+        "mac_in_use": {
+            "message": "MAC address {mac} is already used by another reservation."
+        },
+        "reservation_not_found": {
+            "message": "No DHCP reservation matched."
+        },
+        "forward_not_found": {
+            "message": "No port forward matched."
         }
     },
     "selector": {
