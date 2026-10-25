@@ -48,15 +48,21 @@ ATTR_CONFIG_ENTRY_ID = "config_entry_id"
 ATTR_DESCRIPTION = "description"
 ATTR_DRY_RUN = "dry_run"
 ATTR_ENABLED = "enabled"
+ATTR_FORCE = "force"
+ATTR_REFRESH = "refresh"
+ATTR_SUGGEST = "suggest"
 ATTR_FORWARD_ID = "forward_id"
 ATTR_GATEWAY_PORT = "gateway_port"
 ATTR_IP = "ip"
 ATTR_MAC = "mac"
+ATTR_MACS = "macs"
 ATTR_NETWORK = "network"
+ATTR_PREFIX_AREA = "prefix_area"
 ATTR_PROTOCOL = "protocol"
 ATTR_RESERVATION_ID = "reservation_id"
 ATTR_TARGET_NETWORK = "target_network"
 ATTR_TARGET_PROFILE = "target_profile"
+ATTR_TARGETS = "targets"
 
 CONF_ACTIVITY = "activity"
 CONF_ACTIVITY_CLIENTS = "clients"
@@ -104,12 +110,20 @@ SERVICE_CREATE_PORT_FORWARD = "create_port_forward"
 SERVICE_CREATE_RESERVATION = "create_reservation"
 SERVICE_DELETE_PORT_FORWARD = "delete_port_forward"
 SERVICE_DELETE_RESERVATION = "delete_reservation"
+SERVICE_IP_TABLE = "ip_table"
 SERVICE_LIST_PORT_FORWARDS = "list_port_forwards"
 SERVICE_LIST_RESERVATIONS = "list_reservations"
+SERVICE_RELEASE_IP = "release_ip"
+SERVICE_RESERVE_IP = "reserve_ip"
 SERVICE_SET_BLOCKED_APPS = "set_blocked_apps"
+SERVICE_SYNC_NAMES = "sync_names"
 SERVICE_UPDATE_RESERVATION = "update_reservation"
 
+CONF_CRITICAL_INTEGRATIONS = "critical_integrations"
+CONF_IP_TABLE_EVERY = "ip_table_every"
 CONF_MISCELLANEOUS = "miscellaneous"
+CONF_RESERVATION_RANGE = "reservation_range"
+CONF_STALE_RESERVATION_DAYS = "stale_reservation_days"
 CONF_PREFIX_NETWORK_NAME = "prefix_network_name"
 CONF_RESOURCES = "resources"
 CONF_SAVE_RESPONSES = "save_responses"
@@ -132,6 +146,38 @@ MAX_TIMEOUT: int = 60
 STEP_TIMEOUT: int = 5
 
 DEFAULT_CONSIDER_HOME: int = 0
+DEFAULT_CRITICAL_INTEGRATIONS = (
+    "home_connect_local",
+    "homeconnect_ws",
+    "shelly",
+    "esphome",
+    "denonavr",
+    "heos",
+    "nibe",
+    "myuplink",
+    "zehnder",
+    "comfoconnect",
+    "frigate",
+    "reolink",
+    "sonos",
+    "synology_dsm",
+    "p1",
+    "dsmr",
+    "homewizard",
+    "ipp",
+    "hp",
+    "elgato",
+    "tesla_wall_connector",
+    "apple_tv",
+    "webostv",
+)
+DEFAULT_IP_TABLE_EVERY: int = 1
+DEFAULT_RESERVATION_RANGE: str = ""
+DEFAULT_STALE_RESERVATION_DAYS: int = 30
+MIN_IP_TABLE_EVERY: int = 1
+MAX_IP_TABLE_EVERY: int = 48
+MIN_STALE_RESERVATION_DAYS: int = 1
+MAX_STALE_RESERVATION_DAYS: int = 365
 DEFAULT_PREFIX_NETWORK_NAME: bool = True
 DEFAULT_SAVE_LOCATION: str = f"/config/custom_components/{DOMAIN}/api/responses"
 DEFAULT_SAVE_RESPONSES: bool = False

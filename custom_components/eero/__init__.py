@@ -86,6 +86,8 @@ from .const import (
     MODEL_PROFILE,
     SERVICE_SET_BLOCKED_APPS,
 )
+from .frontend import async_register_frontend
+from .ip_table import ip_table_settings
 from .services import async_register_services, async_unload_services
 
 SET_BLOCKED_APPS_SCHEMA = vol.Schema(
@@ -117,6 +119,12 @@ PLATFORMS = [
 ]
 
 _LOGGER = logging.getLogger(__name__)
+
+
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    """Register the bundled IP table card."""
+    await async_register_frontend(hass)
+    return True
 
 
 def _jsonable(value: Any) -> Any:
@@ -332,6 +340,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
         CONF_SCAN_INTERVAL, data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
     )
     conf_timeout = options.get(CONF_TIMEOUT, data.get(CONF_TIMEOUT, DEFAULT_TIMEOUT))
+    ip_settings = ip_table_settings(options, data)
 
     device_registry = dr.async_get(hass)
     entity_registry = er.async_get(hass)
@@ -505,7 +514,9 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
         """
         try:
             async with timeout(conf_timeout):
-                return await hass.async_add_executor_job(api.update, conf_update)
+                return await hass.async_add_executor_job(
+                    lambda: api.update(conf_update, ip_table_every=ip_settings["every"])
+                )
         except EeroAuthException as error:
             raise ConfigEntryAuthFailed("Eero session rejected") from error
         except EeroException as error:
@@ -610,6 +621,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
                 model=MODEL_NETWORK,
             )
 
+    await async_register_frontend(hass)
     async_register_services(hass)
 
     await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)

@@ -241,3 +241,127 @@ delete_port_forward:
       default: false
       selector:
         boolean:
+
+ip_table:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: eero
+    network:
+      required: false
+      example: My Network
+      selector:
+        text:
+    refresh:
+      required: false
+      default: false
+      selector:
+        boolean:
+
+reserve_ip:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: eero
+    network:
+      required: false
+      example: My Network
+      selector:
+        text:
+    mac:
+      required: true
+      example: "00:11:22:33:44:55"
+      selector:
+        text:
+    ip:
+      required: false
+      example: "192.168.4.50"
+      selector:
+        text:
+    description:
+      required: false
+      example: Kitchen Denon
+      selector:
+        text:
+    suggest:
+      required: false
+      default: false
+      selector:
+        boolean:
+    force:
+      required: false
+      default: false
+      selector:
+        boolean:
+    dry_run:
+      required: false
+      default: false
+      selector:
+        boolean:
+
+release_ip:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: eero
+    network:
+      required: false
+      example: My Network
+      selector:
+        text:
+    mac:
+      required: true
+      example: "00:11:22:33:44:55"
+      selector:
+        text:
+    dry_run:
+      required: false
+      default: false
+      selector:
+        boolean:
+
+sync_names:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: eero
+    network:
+      required: false
+      example: My Network
+      selector:
+        text:
+    dry_run:
+      required: false
+      default: true
+      selector:
+        boolean:
+    targets:
+      required: false
+      example: nickname, reservation
+      selector:
+        select:
+          multiple: true
+          options:
+            - nickname
+            - reservation
+    prefix_area:
+      required: false
+      default: when_missing
+      selector:
+        select:
+          options:
+            - never
+            - when_missing
+    macs:
+      required: false
+      example: "00:11:22:33:44:55"
+      selector:
+        text:

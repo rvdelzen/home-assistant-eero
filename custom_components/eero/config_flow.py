@@ -22,6 +22,7 @@ from homeassistant.helpers.selector import (
 )
 
 from .api import EeroAPI, EeroException
+from .ip_table import critical_integrations_text, validate_reservation_range
 from .const import (
     ACTIVITIES_DATA_USAGE_DEFAULT,
     ACTIVITIES_DATA_USAGE_PREMIUM,
@@ -35,14 +36,18 @@ from .const import (
     CONF_BACKUP_NETWORKS,
     CONF_CODE,
     CONF_CONSIDER_HOME,
+    CONF_CRITICAL_INTEGRATIONS,
     CONF_EEROS,
+    CONF_IP_TABLE_EVERY,
     CONF_LOGIN,
     CONF_MISCELLANEOUS,
     CONF_NETWORKS,
     CONF_PREFIX_NETWORK_NAME,
     CONF_PROFILES,
+    CONF_RESERVATION_RANGE,
     CONF_RESOURCES,
     CONF_SAVE_RESPONSES,
+    CONF_STALE_RESERVATION_DAYS,
     CONF_SHOW_EERO_LOGO,
     CONF_SUFFIX_CONNECTION_TYPE,
     CONF_TIMEOUT,
@@ -53,7 +58,9 @@ from .const import (
     CONF_WIRELESS_CLIENTS_FILTER,
     DATA_API,
     DEFAULT_CONSIDER_HOME,
+    DEFAULT_IP_TABLE_EVERY,
     DEFAULT_PREFIX_NETWORK_NAME,
+    DEFAULT_STALE_RESERVATION_DAYS,
     DEFAULT_SAVE_RESPONSES,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_SHOW_EERO_LOGO,
@@ -63,10 +70,14 @@ from .const import (
     DEFAULT_WIRELESS_CLIENTS_FILTER,
     DOMAIN,
     MAX_CONSIDER_HOME,
+    MAX_IP_TABLE_EVERY,
     MAX_SCAN_INTERVAL,
+    MAX_STALE_RESERVATION_DAYS,
     MAX_TIMEOUT,
     MIN_CONSIDER_HOME,
+    MIN_IP_TABLE_EVERY,
     MIN_SCAN_INTERVAL,
+    MIN_STALE_RESERVATION_DAYS,
     MIN_TIMEOUT,
     STEP_CONSIDER_HOME,
     STEP_SCAN_INTERVAL,
@@ -75,6 +86,61 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+_IP_TABLE_OPTION_KEYS = (
+    CONF_IP_TABLE_EVERY,
+    CONF_STALE_RESERVATION_DAYS,
+    CONF_RESERVATION_RANGE,
+    CONF_CRITICAL_INTEGRATIONS,
+)
+
+
+def _ip_table_fields(
+    *, every: int, stale_days: int, reservation_range: str, critical: str
+) -> dict:
+    """Schema fields for the IP table options on the advanced step."""
+    return {
+        vol.Optional(CONF_IP_TABLE_EVERY, default=int(every)): NumberSelector(
+            NumberSelectorConfig(
+                min=MIN_IP_TABLE_EVERY,
+                max=MAX_IP_TABLE_EVERY,
+                step=1,
+            )
+        ),
+        vol.Optional(
+            CONF_STALE_RESERVATION_DAYS, default=int(stale_days)
+        ): NumberSelector(
+            NumberSelectorConfig(
+                min=MIN_STALE_RESERVATION_DAYS,
+                max=MAX_STALE_RESERVATION_DAYS,
+                step=1,
+            )
+        ),
+        vol.Optional(
+            CONF_RESERVATION_RANGE, default=reservation_range or ""
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+        vol.Optional(CONF_CRITICAL_INTEGRATIONS, default=critical): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.TEXT)
+        ),
+    }
+
+
+def _store_ip_table_options(user_input: dict, target: dict) -> None:
+    """Copy validated IP table options onto the entry payload."""
+    target[CONF_IP_TABLE_EVERY] = int(
+        user_input.get(CONF_IP_TABLE_EVERY, DEFAULT_IP_TABLE_EVERY)
+    )
+    target[CONF_STALE_RESERVATION_DAYS] = int(
+        user_input.get(CONF_STALE_RESERVATION_DAYS, DEFAULT_STALE_RESERVATION_DAYS)
+    )
+    target[CONF_RESERVATION_RANGE] = validate_reservation_range(
+        user_input.get(CONF_RESERVATION_RANGE, "")
+    )
+    critical = str(user_input.get(CONF_CRITICAL_INTEGRATIONS, "") or "").strip()
+    if critical:
+        target[CONF_CRITICAL_INTEGRATIONS] = critical
+    else:
+        target.pop(CONF_CRITICAL_INTEGRATIONS, None)
 
 
 class EeroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -504,12 +570,17 @@ class EeroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if invalid_scan_interval_timeout:
                 errors["base"] = "invalid_scan_interval_timeout"
             else:
-                self.user_input[CONF_SAVE_RESPONSES] = user_input[CONF_SAVE_RESPONSES]
-                self.user_input[CONF_SCAN_INTERVAL] = conf_scan_interval
-                self.user_input[CONF_TIMEOUT] = conf_timeout
-                return self.async_create_entry(
-                    title=self.config_title, data=self.user_input
-                )
+                try:
+                    _store_ip_table_options(user_input, self.user_input)
+                except ValueError:
+                    errors["base"] = "invalid_reservation_range"
+                else:
+                    self.user_input[CONF_SAVE_RESPONSES] = user_input[CONF_SAVE_RESPONSES]
+                    self.user_input[CONF_SCAN_INTERVAL] = conf_scan_interval
+                    self.user_input[CONF_TIMEOUT] = conf_timeout
+                    return self.async_create_entry(
+                        title=self.config_title, data=self.user_input
+                    )
 
         return self.async_show_form(
             step_id="advanced",
@@ -535,6 +606,12 @@ class EeroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             step=STEP_TIMEOUT,
                             unit_of_measurement=UnitOfTime.SECONDS,
                         )
+                    ),
+                    **_ip_table_fields(
+                        every=DEFAULT_IP_TABLE_EVERY,
+                        stale_days=DEFAULT_STALE_RESERVATION_DAYS,
+                        reservation_range="",
+                        critical=critical_integrations_text(None),
                     ),
                 }
             ),
@@ -1083,6 +1160,7 @@ class EeroOptionsFlowHandler(config_entries.OptionsFlow):
             self.index = 0
             if self.show_advanced_options:
                 return await self.async_step_advanced()
+            self._keep_ip_table_options()
             return self.async_create_entry(title="", data=self.user_input)
         if self.index == 0:
             self.user_input[CONF_MISCELLANEOUS] = {}
@@ -1153,10 +1231,15 @@ class EeroOptionsFlowHandler(config_entries.OptionsFlow):
             if invalid_scan_interval_timeout:
                 errors["base"] = "invalid_scan_interval_timeout"
             else:
-                self.user_input[CONF_SAVE_RESPONSES] = user_input[CONF_SAVE_RESPONSES]
-                self.user_input[CONF_SCAN_INTERVAL] = conf_scan_interval
-                self.user_input[CONF_TIMEOUT] = conf_timeout
-                return self.async_create_entry(title="", data=self.user_input)
+                try:
+                    _store_ip_table_options(user_input, self.user_input)
+                except ValueError:
+                    errors["base"] = "invalid_reservation_range"
+                else:
+                    self.user_input[CONF_SAVE_RESPONSES] = user_input[CONF_SAVE_RESPONSES]
+                    self.user_input[CONF_SCAN_INTERVAL] = conf_scan_interval
+                    self.user_input[CONF_TIMEOUT] = conf_timeout
+                    return self.async_create_entry(title="", data=self.user_input)
 
         conf_save_responses = self.options.get(
             CONF_SAVE_RESPONSES,
@@ -1168,6 +1251,21 @@ class EeroOptionsFlowHandler(config_entries.OptionsFlow):
         )
         conf_timeout = self.options.get(
             CONF_TIMEOUT, self.data.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
+        )
+        saved_every = self.options.get(
+            CONF_IP_TABLE_EVERY, self.data.get(CONF_IP_TABLE_EVERY, DEFAULT_IP_TABLE_EVERY)
+        )
+        saved_stale = self.options.get(
+            CONF_STALE_RESERVATION_DAYS,
+            self.data.get(CONF_STALE_RESERVATION_DAYS, DEFAULT_STALE_RESERVATION_DAYS),
+        )
+        saved_range = self.options.get(
+            CONF_RESERVATION_RANGE, self.data.get(CONF_RESERVATION_RANGE, "")
+        )
+        saved_critical = critical_integrations_text(
+            self.options.get(
+                CONF_CRITICAL_INTEGRATIONS, self.data.get(CONF_CRITICAL_INTEGRATIONS)
+            )
         )
 
         return self.async_show_form(
@@ -1195,7 +1293,21 @@ class EeroOptionsFlowHandler(config_entries.OptionsFlow):
                             unit_of_measurement=UnitOfTime.SECONDS,
                         )
                     ),
+                    **_ip_table_fields(
+                        every=saved_every,
+                        stale_days=saved_stale,
+                        reservation_range=saved_range or "",
+                        critical=saved_critical,
+                    ),
                 }
             ),
             errors=errors,
         )
+
+    def _keep_ip_table_options(self) -> None:
+        """Keep IP table options when the advanced step is skipped."""
+        source = dict(self.data)
+        source.update(self.options)
+        for key in _IP_TABLE_OPTION_KEYS:
+            if key in source and key not in self.user_input:
+                self.user_input[key] = source[key]

@@ -20,9 +20,14 @@ from homeassistant.const import (
     UnitOfInformation,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import StateType
+from homeassistant.helpers.update_coordinator import (
+    CoordinatorEntity,
+    DataUpdateCoordinator,
+)
 
 from . import EeroEntity, EeroEntityDescription
 from .api.const import (
@@ -48,8 +53,13 @@ from .const import (
     CONF_PROFILES,
     CONF_RESOURCES,
     DATA_COORDINATOR,
+    DOMAIN,
     DOMAIN as EERO_DOMAIN,
+    MANUFACTURER,
+    MODEL_NETWORK,
 )
+from .ip_table import build_ip_table, ip_table_settings, sensor_attributes
+from .services import collect_ha_records
 from .util import client_allowed
 
 DEVICE_CATEGORIES = [
@@ -415,6 +425,10 @@ async def async_setup_entry(
                                 )
                             )
 
+            entities.append(
+                EeroIpReservationSensor(coordinator, network.id, config_entry)
+            )
+
     async_add_entities(entities)
 
 
@@ -475,3 +489,79 @@ class EeroSensorEntity(EeroEntity, SensorEntity):
             ):
                 attrs["failure_reason"] = failure_reason.lower()
         return attrs
+
+
+class EeroIpReservationSensor(CoordinatorEntity, SensorEntity):
+    """Count DHCP reservations without storing the device table."""
+
+    _attr_icon = "mdi:ip-network"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self,
+        coordinator: DataUpdateCoordinator,
+        network_id: str,
+        config_entry: ConfigEntry,
+    ) -> None:
+        """Initialize the reservation count for one network."""
+        super().__init__(coordinator)
+        self._network_id = network_id
+        self._config_entry = config_entry
+        self._attr_unique_id = f"{network_id}-ip_reservations"
+
+    @property
+    def network(self):
+        """Return the coordinator network this sensor belongs to."""
+        data = getattr(self.coordinator, "data", None)
+        for network in getattr(data, "networks", []) or []:
+            if getattr(network, "id", None) == self._network_id:
+                return network
+        return None
+
+    @property
+    def available(self) -> bool:
+        """Return True when the network is present in the latest poll."""
+        return self.network is not None
+
+    @property
+    def name(self) -> str:
+        """Return the entity name, for example Ohana IP Reservations."""
+        network = self.network
+        base = getattr(network, "name", None) or "Eero"
+        return f"{base} IP Reservations"
+
+    @property
+    def device_info(self) -> dr.DeviceInfo:
+        """Attach the sensor to the network device."""
+        network = self.network
+        return dr.DeviceInfo(
+            entry_type=dr.DeviceEntryType.SERVICE,
+            identifiers={(DOMAIN, self._network_id)},
+            manufacturer=MANUFACTURER,
+            model=MODEL_NETWORK,
+            name=getattr(network, "name", None),
+        )
+
+    def _table(self) -> dict:
+        network = self.network
+        data = getattr(network, "data", None) if network is not None else None
+        payload = data if isinstance(data, dict) else {}
+        settings = ip_table_settings(self._config_entry.options, self._config_entry.data)
+        return build_ip_table(
+            payload.get("ip_devices") or [],
+            payload.get("ip_reservations") or [],
+            ha_devices=collect_ha_records(self.hass) if self.hass else [],
+            stale_after_days=settings["stale_days"],
+            critical_integrations=settings["critical_integrations"],
+            inventory_stale=bool(payload.get("ip_inventory_stale")),
+        )
+
+    @property
+    def native_value(self) -> StateType:
+        """Return the number of DHCP reservations."""
+        return self._table()["summary"]["reservations"]
+
+    @property
+    def extra_state_attributes(self) -> Mapping[str, Any]:
+        """Return the small count attributes. The full table stays out."""
+        return sensor_attributes(self._table()["summary"])
