@@ -2,6 +2,18 @@
     "services": {
         "set_blocked_apps": {
             "service": "mdi:account-cancel"
+        },
+        "ip_table": {
+            "service": "mdi:table-network"
+        },
+        "reserve_ip": {
+            "service": "mdi:pin"
+        },
+        "release_ip": {
+            "service": "mdi:pin-off"
+        },
+        "sync_names": {
+            "service": "mdi:rename"
         }
     }
 }

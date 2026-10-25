@@ -9,7 +9,8 @@
         "error": {
             "invalid_code": "Invalid code",
             "invalid_login": "Invalid login",
-            "invalid_scan_interval_timeout": "Polling timeout should be set less than scan interval in order to avoid potential problems."
+            "invalid_scan_interval_timeout": "Polling timeout should be set less than scan interval in order to avoid potential problems.",
+            "invalid_reservation_range": "Reservation range must be an IPv4 CIDR or a start-end range of at most 4096 addresses."
         },
         "step": {
             "user": {
@@ -70,7 +71,11 @@
                 "data": {
                     "save_responses": "Save server responses to custom_components/eero/api/responses",
                     "scan_interval": "Polling interval",
-                    "timeout": "Polling timeout"
+                    "timeout": "Polling timeout",
+                    "ip_table_every": "Refresh the device and reservation inventory every N polls",
+                    "stale_reservation_days": "Days before an offline reservation is stale",
+                    "reservation_range": "Free-address range (CIDR or start-end, blank for the LAN)",
+                    "critical_integrations": "Critical integrations (comma-separated, blank for the default list)"
                 },
                 "title": "Advanced options"
             },
@@ -106,7 +111,8 @@
     },
     "options": {
         "error": {
-            "invalid_scan_interval_timeout": "Polling timeout should be set less than scan interval in order to avoid potential problems."
+            "invalid_scan_interval_timeout": "Polling timeout should be set less than scan interval in order to avoid potential problems.",
+            "invalid_reservation_range": "Reservation range must be an IPv4 CIDR or a start-end range of at most 4096 addresses."
         },
         "step": {
             "networks": {
@@ -153,7 +159,11 @@
                 "data": {
                     "save_responses": "Save server responses to custom_components/eero/api/responses",
                     "scan_interval": "Polling interval",
-                    "timeout": "Polling timeout"
+                    "timeout": "Polling timeout",
+                    "ip_table_every": "Refresh the device and reservation inventory every N polls",
+                    "stale_reservation_days": "Days before an offline reservation is stale",
+                    "reservation_range": "Free-address range (CIDR or start-end, blank for the LAN)",
+                    "critical_integrations": "Critical integrations (comma-separated, blank for the default list)"
                 },
                 "title": "Advanced options"
             }
@@ -369,6 +379,114 @@
                 "dry_run": {
                     "name": "Dry run",
                     "description": "Return the planned change without deleting the port forward."
+                }
+            }
+        },
+        "ip_table": {
+            "name": "IP table",
+            "description": "Return one row per device and per reservation that has no device, plus a summary.",
+            "fields": {
+                "config_entry_id": {
+                    "name": "Config entry",
+                    "description": "Eero account. Optional when only one entry is loaded."
+                },
+                "network": {
+                    "name": "Network",
+                    "description": "Network id or name. Defaults to the entry's only network, or the first configured network."
+                },
+                "refresh": {
+                    "name": "Refresh",
+                    "description": "Fetch devices and reservations now. Otherwise the last poll is returned."
+                }
+            }
+        },
+        "reserve_ip": {
+            "name": "Reserve IP",
+            "description": "Create a DHCP reservation for a MAC. The IP defaults to the current address, or a free address when the device has none.",
+            "fields": {
+                "config_entry_id": {
+                    "name": "Config entry",
+                    "description": "Eero account. Optional when only one entry is loaded."
+                },
+                "network": {
+                    "name": "Network",
+                    "description": "Network id or name. Defaults to the entry's only network, or the first configured network."
+                },
+                "mac": {
+                    "name": "MAC address",
+                    "description": "Device MAC address."
+                },
+                "ip": {
+                    "name": "IP address",
+                    "description": "Address to reserve. Defaults to the device's current address."
+                },
+                "description": {
+                    "name": "Description",
+                    "description": "Reservation label. Defaults to the Home Assistant device name, then the eero nickname, then the hostname."
+                },
+                "suggest": {
+                    "name": "Suggest a free address",
+                    "description": "Pick a free address instead of the current one."
+                },
+                "force": {
+                    "name": "Force",
+                    "description": "Reserve a private or randomized MAC address."
+                },
+                "dry_run": {
+                    "name": "Dry run",
+                    "description": "Return the planned reservation without creating it."
+                }
+            }
+        },
+        "release_ip": {
+            "name": "Release IP",
+            "description": "Delete the DHCP reservation for a MAC. Port forwards are kept.",
+            "fields": {
+                "config_entry_id": {
+                    "name": "Config entry",
+                    "description": "Eero account. Optional when only one entry is loaded."
+                },
+                "network": {
+                    "name": "Network",
+                    "description": "Network id or name. Defaults to the entry's only network, or the first configured network."
+                },
+                "mac": {
+                    "name": "MAC address",
+                    "description": "MAC address whose reservation should be deleted."
+                },
+                "dry_run": {
+                    "name": "Dry run",
+                    "description": "Return the planned deletion without deleting the reservation."
+                }
+            }
+        },
+        "sync_names": {
+            "name": "Sync names",
+            "description": "Copy Home Assistant device names onto eero nicknames and reservation descriptions. Nothing is written back to Home Assistant. Dry run is the default.",
+            "fields": {
+                "config_entry_id": {
+                    "name": "Config entry",
+                    "description": "Eero account to update."
+                },
+                "network": {
+                    "name": "Network",
+                    "description": "Network id or name. Defaults to the entry's only network, or the first configured network."
+                },
+                "dry_run": {
+                    "name": "Dry run",
+                    "description": "Return the diff without writing. Defaults to true."
+                },
+                "targets": {
+                    "name": "Targets",
+                    "description": "nickname, reservation, or both. Defaults to both."
+                },
+                "prefix_area": {
+                    "name": "Area prefix",
+                    "description": "when_missing prefixes the area when the Home Assistant name does not already contain it, and expands a name that is only the area with the model. never leaves the name as it is."
+                },
+                "macs": {
+                    "name": "MAC addresses",
+                    "description": "Optional list of MACs to consider. Other devices are left out of the diff."
                 }
             }
         }

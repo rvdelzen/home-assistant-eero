@@ -13,6 +13,7 @@ Port-forward bodies use the six fields documented by eero-api
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 from typing import Any
 from urllib.parse import quote
@@ -26,7 +27,11 @@ from homeassistant.core import (
     SupportsResponse,
 )
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
-from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import (
+    area_registry as ar,
+    config_validation as cv,
+    device_registry as dr,
+)
 from homeassistant.helpers.selector import selector
 
 from .api import EeroAuthException, EeroException
@@ -37,13 +42,19 @@ from .const import (
     ATTR_DESCRIPTION,
     ATTR_DRY_RUN,
     ATTR_ENABLED,
+    ATTR_FORCE,
     ATTR_FORWARD_ID,
     ATTR_GATEWAY_PORT,
     ATTR_IP,
     ATTR_MAC,
+    ATTR_MACS,
     ATTR_NETWORK,
+    ATTR_PREFIX_AREA,
     ATTR_PROTOCOL,
+    ATTR_REFRESH,
     ATTR_RESERVATION_ID,
+    ATTR_SUGGEST,
+    ATTR_TARGETS,
     CONF_NETWORKS,
     DATA_API,
     DATA_COORDINATOR,
@@ -52,10 +63,33 @@ from .const import (
     SERVICE_CREATE_RESERVATION,
     SERVICE_DELETE_PORT_FORWARD,
     SERVICE_DELETE_RESERVATION,
+    SERVICE_IP_TABLE,
     SERVICE_LIST_PORT_FORWARDS,
     SERVICE_LIST_RESERVATIONS,
+    SERVICE_RELEASE_IP,
+    SERVICE_RESERVE_IP,
+    SERVICE_SYNC_NAMES,
     SERVICE_UPDATE_RESERVATION,
 )
+from .ip_table import (
+    build_ip_table,
+    current_ipv4,
+    default_reservation_description,
+    ip_table_settings,
+    is_private_mac,
+    mac_key,
+    registry_mac_records,
+    suggest_free_ip,
+)
+from .names import (
+    PREFIX_NEVER,
+    PREFIX_WHEN_MISSING,
+    TARGET_NICKNAME,
+    TARGET_RESERVATION,
+    plan_name_sync,
+)
+
+_LOGGER = logging.getLogger(__name__)
 
 _MAC_RE = re.compile(r"^(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$|^[0-9A-Fa-f]{12}$")
 _PROTOCOLS = {"tcp", "udp"}
@@ -67,6 +101,10 @@ _SERVICES = (
     SERVICE_LIST_PORT_FORWARDS,
     SERVICE_CREATE_PORT_FORWARD,
     SERVICE_DELETE_PORT_FORWARD,
+    SERVICE_IP_TABLE,
+    SERVICE_RESERVE_IP,
+    SERVICE_RELEASE_IP,
+    SERVICE_SYNC_NAMES,
 )
 
 _ENTRY_FIELDS = {
@@ -119,6 +157,56 @@ CREATE_PORT_FORWARD_SCHEMA = _schema(
         vol.Optional(ATTR_DESCRIPTION, default=""): cv.string,
         vol.Optional(ATTR_ENABLED, default=True): cv.boolean,
         vol.Optional(ATTR_DRY_RUN, default=False): cv.boolean,
+    }
+)
+_OPTIONAL_ENTRY_FIELDS = {
+    vol.Optional(ATTR_CONFIG_ENTRY_ID): selector(
+        {"config_entry": {"integration": DOMAIN}}
+    ),
+    vol.Optional(ATTR_NETWORK): cv.string,
+}
+
+
+def _optional_schema(extra: dict[Any, Any]) -> vol.Schema:
+    """Build a schema whose config entry is optional for a single entry."""
+    fields = dict(_OPTIONAL_ENTRY_FIELDS)
+    fields.update(extra)
+    return vol.Schema(fields)
+
+
+IP_TABLE_SCHEMA = _optional_schema(
+    {vol.Optional(ATTR_REFRESH, default=False): cv.boolean}
+)
+RESERVE_IP_SCHEMA = _optional_schema(
+    {
+        vol.Required(ATTR_MAC): cv.string,
+        vol.Optional(ATTR_IP): cv.string,
+        vol.Optional(ATTR_DESCRIPTION): cv.string,
+        vol.Optional(ATTR_DRY_RUN, default=False): cv.boolean,
+        vol.Optional(ATTR_SUGGEST, default=False): cv.boolean,
+        vol.Optional(ATTR_FORCE, default=False): cv.boolean,
+    }
+)
+RELEASE_IP_SCHEMA = _optional_schema(
+    {
+        vol.Required(ATTR_MAC): cv.string,
+        vol.Optional(ATTR_DRY_RUN, default=False): cv.boolean,
+    }
+)
+SYNC_NAMES_SCHEMA = _schema(
+    {
+        vol.Optional(ATTR_DRY_RUN, default=True): cv.boolean,
+        vol.Optional(
+            ATTR_TARGETS, default=[TARGET_NICKNAME, TARGET_RESERVATION]
+        ): vol.All(
+            cv.ensure_list,
+            [vol.In((TARGET_NICKNAME, TARGET_RESERVATION))],
+            vol.Length(min=1),
+        ),
+        vol.Optional(ATTR_PREFIX_AREA, default=PREFIX_WHEN_MISSING): vol.In(
+            (PREFIX_NEVER, PREFIX_WHEN_MISSING)
+        ),
+        vol.Optional(ATTR_MACS): vol.All(cv.ensure_list, [cv.string]),
     }
 )
 DELETE_PORT_FORWARD_SCHEMA = _schema(
@@ -502,6 +590,374 @@ def _optional_id(call: ServiceCall, key: str) -> str | None:
     return str(call.data[key]).strip() or None
 
 
+def collect_ha_records(hass: HomeAssistant) -> list[dict[str, Any]]:
+    """Return device-registry records keyed by a normalised connection MAC."""
+    registry = dr.async_get(hass)
+
+    def domain_for(entry_id: str) -> str | None:
+        entry = hass.config_entries.async_get_entry(entry_id)
+        if entry is None:
+            return None
+        return entry.domain
+
+    return registry_mac_records(registry.devices.values(), domain_for)
+
+
+def _loaded_entry_ids(hass: HomeAssistant) -> list[str]:
+    """Return ids of loaded eero config entries."""
+    return [
+        key
+        for key, value in hass.data.get(DOMAIN, {}).items()
+        if isinstance(value, dict) and DATA_API in value
+    ]
+
+
+def _entry_id_from_call(hass: HomeAssistant, call: ServiceCall) -> str:
+    """Use the requested entry, or the only loaded entry."""
+    requested = call.data.get(ATTR_CONFIG_ENTRY_ID)
+    if requested:
+        return str(requested)
+    loaded = _loaded_entry_ids(hass)
+    if len(loaded) == 1:
+        return loaded[0]
+    if not loaded:
+        raise ServiceValidationError("No Eero config entry is loaded")
+    raise ServiceValidationError(
+        "config_entry_id is required when more than one Eero entry is loaded"
+    )
+
+
+def _context_for(hass: HomeAssistant, call: ServiceCall) -> tuple[Any, dict[str, Any], Any, str]:
+    """Return the entry, runtime, API client, and network id."""
+    entry, runtime = _runtime(hass, _entry_id_from_call(hass, call))
+    return entry, runtime, runtime[DATA_API], _network_id(entry, runtime, call.data.get(ATTR_NETWORK))
+
+
+def _network_obj(runtime: dict[str, Any], network_id: str) -> Any:
+    """Return the coordinator network object, if the poll has produced one."""
+    coordinator = runtime.get(DATA_COORDINATOR)
+    data = getattr(coordinator, "data", None)
+    for network in getattr(data, "networks", []) or []:
+        if getattr(network, "id", None) == network_id:
+            return network
+    return None
+
+
+def _network_data(network: Any) -> dict[str, Any]:
+    data = getattr(network, "data", None)
+    return data if isinstance(data, dict) else {}
+
+
+def _cached_inventory(network: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+    data = _network_data(network)
+    if "ip_devices" not in data or "ip_reservations" not in data:
+        return None
+    devices = data.get("ip_devices") or []
+    reservations = data.get("ip_reservations") or []
+    if not isinstance(devices, list) or not isinstance(reservations, list):
+        return None
+    return devices, reservations
+
+
+def _devices_url(network: Any, network_id: str) -> str:
+    resources = _network_data(network).get("resources") or {}
+    url = resources.get("devices") if isinstance(resources, dict) else None
+    if isinstance(url, str) and url.startswith("/"):
+        return url
+    return f"/2.2/networks/{_segment(network_id)}/devices"
+
+
+def _node_ips(network: Any) -> list[str]:
+    ips: list[str] = []
+    for eero in (_network_data(network).get("eeros") or {}).get("data") or []:
+        if not isinstance(eero, dict):
+            continue
+        for key in ("ip_address", "ip"):
+            if eero.get(key):
+                ips.append(str(eero[key]))
+    return ips
+
+
+def _gateway_ip(network: Any) -> str | None:
+    data = _network_data(network)
+    if data.get("gateway_ip"):
+        return str(data["gateway_ip"])
+    for eero in (data.get("eeros") or {}).get("data") or []:
+        if isinstance(eero, dict) and eero.get("gateway") and eero.get("ip_address"):
+            return str(eero["ip_address"])
+    return None
+
+
+def _store_inventory(
+    runtime: dict[str, Any],
+    network_id: str,
+    devices: list[dict[str, Any]],
+    reservations: list[dict[str, Any]],
+) -> None:
+    """Publish a snapshot on the coordinator network and the API cache."""
+    network = _network_obj(runtime, network_id)
+    if network is not None:
+        if not isinstance(getattr(network, "data", None), dict):
+            network.data = {}
+        network.data["ip_devices"] = devices
+        network.data["ip_reservations"] = reservations
+    api = runtime.get(DATA_API)
+    remember = getattr(api, "remember_ip_inventory", None)
+    if remember is not None:
+        remember(network_id, devices, reservations)
+    coordinator = runtime.get(DATA_COORDINATOR)
+    if (
+        coordinator is not None
+        and hasattr(coordinator, "async_set_updated_data")
+        and getattr(coordinator, "data", None) is not None
+    ):
+        coordinator.async_set_updated_data(coordinator.data)
+
+
+def _log_inventory_once(runtime: dict[str, Any], network_id: str, err: Exception) -> None:
+    """Log one inventory failure per outage. The message has no session material."""
+    logged = runtime.setdefault("_ip_inventory_logged", set())
+    if network_id in logged:
+        return
+    logged.add(network_id)
+    _LOGGER.warning(
+        "Could not refresh devices and reservations for network %s; keeping the last good data (%s)",
+        network_id,
+        err,
+    )
+
+
+async def _fetch_inventory(
+    hass: HomeAssistant,
+    api: Any,
+    network_id: str,
+    devices_url: str,
+    *,
+    required: bool,
+) -> dict[str, Any]:
+    """Load devices and reservations. EeroAPI keeps the last good snapshot."""
+    if hasattr(api, "fetch_ip_inventory"):
+
+        def _run() -> dict[str, Any]:
+            return api.fetch_ip_inventory(network_id, devices_url, required=required)
+
+        try:
+            return await hass.async_add_executor_job(_run)
+        except EeroException as err:
+            raise _api_error(err) from err
+    devices = await _read(hass, api, devices_url)
+    reservations = await _read(
+        hass, api, _collection(network_id, "reservations")
+    )
+    return {"devices": devices, "reservations": reservations, "stale": False}
+
+
+def _find_device(devices: list[dict[str, Any]], mac: str) -> dict[str, Any] | None:
+    found = None
+    for device in devices:
+        if isinstance(device, dict) and mac_key(device.get("mac")) == mac:
+            found = device
+    return found
+
+
+async def _async_create_reservation(
+    hass: HomeAssistant,
+    api: Any,
+    network_id: str,
+    *,
+    mac: str,
+    ip: str,
+    description: str,
+    dry_run: bool,
+) -> ServiceResponse:
+    """Create one reservation. Callers pass the same checks as the service."""
+    mac = normalize_mac(mac)
+    ip = normalize_ipv4(ip)
+    url = _collection(network_id, "reservations")
+    records = await _read(hass, api, url)
+    before = [_reservation_view(item) for item in records]
+    _assert_reservation_free(before, ip=ip, mac=mac, ignore_id=None)
+    planned = {"id": None, "ip": ip, "mac": mac, "description": description}
+    if dry_run:
+        return _result(before, [*before, planned], planned, True)
+    await _write(
+        hass,
+        api,
+        METHOD_POST,
+        url,
+        json={"ip": ip, "mac": mac, "description": description},
+    )
+    after = [_reservation_view(item) for item in await _read(hass, api, url)]
+    return _result(before, after, _expect_one("create", before, after), False)
+
+
+async def _async_delete_reservation(
+    hass: HomeAssistant,
+    api: Any,
+    network_id: str,
+    *,
+    reservation_id: str | None,
+    mac: str | None,
+    dry_run: bool,
+) -> ServiceResponse:
+    """Delete one reservation without deleting its port forwards."""
+    if mac:
+        mac = normalize_mac(mac)
+    if reservation_id is None and mac is None:
+        raise ServiceValidationError("Reservation id or MAC address is required")
+    url = _collection(network_id, "reservations")
+    records = await _read(hass, api, url)
+    _item_raw, view = _match_reservation(
+        records, reservation_id=reservation_id, mac=mac
+    )
+    before = [_reservation_view(record) for record in records]
+    if dry_run:
+        after = [current for current in before if current["id"] != view["id"]]
+        return _result(before, after, view, True)
+    await _write(
+        hass,
+        api,
+        METHOD_DELETE,
+        _item(network_id, "reservations", view["id"]),
+        params={"delete_forwards": "false"},
+    )
+    after = [_reservation_view(record) for record in await _read(hass, api, url)]
+    return _result(before, after, _expect_one("delete", before, after), False)
+
+
+async def _async_update_reservation(
+    hass: HomeAssistant,
+    api: Any,
+    network_id: str,
+    *,
+    reservation_id: str | None,
+    mac: str | None,
+    ip: str | None,
+    description: str | None,
+    dry_run: bool,
+) -> ServiceResponse:
+    """Update one reservation. A missing IP or description is left unchanged."""
+    if mac:
+        mac = normalize_mac(mac)
+    if reservation_id is None and mac is None:
+        raise ServiceValidationError("Reservation id or MAC address is required")
+    if ip is None and description is None:
+        raise ServiceValidationError("A new IP address or description is required")
+    new_ip = normalize_ipv4(ip) if ip is not None else None
+    url = _collection(network_id, "reservations")
+    records = await _read(hass, api, url)
+    item, view = _match_reservation(records, reservation_id=reservation_id, mac=mac)
+    resolved_ip = new_ip if new_ip is not None else view["ip"]
+    resolved_description = description if description is not None else view["description"]
+    if resolved_ip == view["ip"] and resolved_description == view["description"]:
+        raise ServiceValidationError(
+            "Reservation already has that IP address and description"
+        )
+    before = [_reservation_view(record) for record in records]
+    _assert_reservation_free(
+        before, ip=resolved_ip, mac=view["mac"], ignore_id=view["id"]
+    )
+    planned = {**view, "ip": resolved_ip, "description": resolved_description}
+    if dry_run:
+        after = [
+            planned if current["id"] == view["id"] else current for current in before
+        ]
+        return _result(before, after, planned, True)
+    body: dict[str, Any] = {
+        "ip": resolved_ip,
+        "mac": view["mac"],
+        "description": resolved_description,
+    }
+    if item.get("public_static_ip") is not None:
+        body["public_static_ip"] = item["public_static_ip"]
+    await _write(
+        hass,
+        api,
+        METHOD_PUT,
+        _item(network_id, "reservations", view["id"]),
+        json=body,
+    )
+    after = [_reservation_view(record) for record in await _read(hass, api, url)]
+    return _result(before, after, _expect_one("update", before, after), False)
+
+
+def collect_name_devices(hass: HomeAssistant) -> list[dict[str, Any]]:
+    """Return registry devices with the fields name matching needs."""
+    registry = dr.async_get(hass)
+    areas = ar.async_get(hass)
+    devices: list[dict[str, Any]] = []
+    for device in registry.devices.values():
+        area = areas.async_get_area(device.area_id) if device.area_id else None
+        devices.append(
+            {
+                "id": device.id,
+                "name": device.name,
+                "name_by_user": device.name_by_user,
+                "area_id": device.area_id,
+                "area_name": area.name if area else None,
+                "model": device.model,
+                "connections": [tuple(item) for item in (device.connections or ())],
+                "identifiers": [tuple(item) for item in (device.identifiers or ())],
+            }
+        )
+    return devices
+
+
+def _nickname_url(network_id: str, device_id: str) -> str:
+    """Nickname writes only stick on the 2.3 devices resource."""
+    return f"/2.3/networks/{_segment(network_id)}/devices/{_segment(device_id)}"
+
+
+def _nickname_text(payload: Any) -> str | None:
+    """Return a nickname from a device read-back, if the payload has one."""
+    if isinstance(payload, list):
+        for item in payload:
+            found = _nickname_text(item)
+            if found is not None:
+                return found
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if "nickname" in payload:
+        value = payload.get("nickname")
+        return "" if value is None else str(value)
+    data = payload.get("data")
+    if isinstance(data, (dict, list)):
+        return _nickname_text(data)
+    return None
+
+
+def _ha_name_for_mac(records: list[dict[str, Any]], mac: str) -> str | None:
+    for record in records:
+        if record.get("mac") == mac and record.get("ha_device_name"):
+            return record["ha_device_name"]
+    return None
+
+
+async def _refresh_inventory(
+    hass: HomeAssistant,
+    runtime: dict[str, Any],
+    api: Any,
+    network_id: str,
+    devices_url: str,
+    *,
+    fallback_devices: list[dict[str, Any]],
+    fallback_reservations: list[dict[str, Any]] | None,
+) -> None:
+    """Refresh the inventory after a write. A failed refresh keeps the result."""
+    try:
+        fresh = await _fetch_inventory(
+            hass, api, network_id, devices_url, required=False
+        )
+        _store_inventory(runtime, network_id, fresh["devices"], fresh["reservations"])
+    except HomeAssistantError as err:
+        _log_inventory_once(runtime, network_id, err)
+        if fallback_reservations is not None:
+            _store_inventory(
+                runtime, network_id, fallback_devices, fallback_reservations
+            )
+
+
 def async_register_services(hass: HomeAssistant) -> None:
     """Register eero services once. Handlers select the entry from the call."""
     if hass.services.has_service(DOMAIN, SERVICE_LIST_RESERVATIONS):
@@ -516,100 +972,292 @@ def async_register_services(hass: HomeAssistant) -> None:
     async def async_create_reservation(call: ServiceCall) -> ServiceResponse:
         """Create one DHCP reservation, or preview it."""
         _entry, api, network_id = _context(hass, call)
-        mac = normalize_mac(call.data[ATTR_MAC])
-        ip = normalize_ipv4(call.data[ATTR_IP])
-        description = call.data[ATTR_DESCRIPTION]
-        dry_run = bool(call.data[ATTR_DRY_RUN])
-        url = _collection(network_id, "reservations")
-        records = await _read(hass, api, url)
-        before = [_reservation_view(item) for item in records]
-        _assert_reservation_free(before, ip=ip, mac=mac, ignore_id=None)
-        planned = {"id": None, "ip": ip, "mac": mac, "description": description}
-        if dry_run:
-            return _result(before, [*before, planned], planned, True)
-        await _write(
+        return await _async_create_reservation(
             hass,
             api,
-            METHOD_POST,
-            url,
-            json={"ip": ip, "mac": mac, "description": description},
+            network_id,
+            mac=call.data[ATTR_MAC],
+            ip=call.data[ATTR_IP],
+            description=call.data[ATTR_DESCRIPTION],
+            dry_run=bool(call.data[ATTR_DRY_RUN]),
         )
-        after = [
-            _reservation_view(item) for item in await _read(hass, api, url)
-        ]
-        return _result(before, after, _expect_one("create", before, after), False)
 
     async def async_update_reservation(call: ServiceCall) -> ServiceResponse:
         """Update one DHCP reservation, or preview it."""
         _entry, api, network_id = _context(hass, call)
-        reservation_id = _optional_id(call, ATTR_RESERVATION_ID)
-        mac = normalize_mac(call.data[ATTR_MAC]) if call.data.get(ATTR_MAC) else None
-        if reservation_id is None and mac is None:
-            raise ServiceValidationError("Reservation id or MAC address is required")
-        has_ip = ATTR_IP in call.data
-        has_description = ATTR_DESCRIPTION in call.data
-        if not has_ip and not has_description:
-            raise ServiceValidationError("A new IP address or description is required")
-        new_ip = normalize_ipv4(call.data[ATTR_IP]) if has_ip else None
-        url = _collection(network_id, "reservations")
-        records = await _read(hass, api, url)
-        item, view = _match_reservation(
-            records, reservation_id=reservation_id, mac=mac
+        return await _async_update_reservation(
+            hass,
+            api,
+            network_id,
+            reservation_id=_optional_id(call, ATTR_RESERVATION_ID),
+            mac=call.data.get(ATTR_MAC),
+            ip=call.data[ATTR_IP] if ATTR_IP in call.data else None,
+            description=(
+                call.data[ATTR_DESCRIPTION] if ATTR_DESCRIPTION in call.data else None
+            ),
+            dry_run=bool(call.data[ATTR_DRY_RUN]),
         )
-        ip = new_ip if new_ip is not None else view["ip"]
-        description = (
-            call.data[ATTR_DESCRIPTION] if has_description else view["description"]
+
+    async def _inventory_for(
+        call: ServiceCall, *, required: bool
+    ) -> tuple[Any, dict[str, Any], Any, str, Any, dict[str, Any]]:
+        entry, runtime, api, network_id = _context_for(hass, call)
+        network = _network_obj(runtime, network_id)
+        snapshot = await _fetch_inventory(
+            hass,
+            api,
+            network_id,
+            _devices_url(network, network_id),
+            required=required,
         )
-        if ip == view["ip"] and description == view["description"]:
-            raise ServiceValidationError(
-                "Reservation already has that IP address and description"
+        return entry, runtime, api, network_id, network, snapshot
+
+    async def async_ip_table(call: ServiceCall) -> ServiceResponse:
+        """Return the merged device and reservation table."""
+        entry, runtime, api, network_id = _context_for(hass, call)
+        network = _network_obj(runtime, network_id)
+        cached = _cached_inventory(network)
+        refresh = bool(call.data.get(ATTR_REFRESH))
+        if refresh or cached is None:
+            snapshot = await _fetch_inventory(
+                hass,
+                api,
+                network_id,
+                _devices_url(network, network_id),
+                required=refresh or cached is None,
             )
-        before = [_reservation_view(record) for record in records]
-        _assert_reservation_free(before, ip=ip, mac=view["mac"], ignore_id=view["id"])
-        planned = {**view, "ip": ip, "description": description}
-        dry_run = bool(call.data[ATTR_DRY_RUN])
-        if dry_run:
-            after = [
-                planned if current["id"] == view["id"] else current for current in before
-            ]
-            return _result(before, after, planned, True)
-        body: dict[str, Any] = {
-            "ip": ip,
-            "mac": view["mac"],
-            "description": description,
+            devices = snapshot["devices"]
+            reservations = snapshot["reservations"]
+            stale = bool(snapshot.get("stale"))
+            if not stale:
+                _store_inventory(runtime, network_id, devices, reservations)
+        else:
+            devices, reservations = cached
+            stale = bool(_network_data(network).get("ip_inventory_stale"))
+        settings = ip_table_settings(entry.options, entry.data)
+        table = build_ip_table(
+            devices,
+            reservations,
+            ha_devices=collect_ha_records(hass),
+            stale_after_days=settings["stale_days"],
+            critical_integrations=settings["critical_integrations"],
+            inventory_stale=stale,
+        )
+        return {
+            **table,
+            "network_id": network_id,
+            "network_name": getattr(network, "name", None),
+            "config_entry_id": entry.entry_id,
         }
-        if item.get("public_static_ip") is not None:
-            body["public_static_ip"] = item["public_static_ip"]
-        await _write(hass, api, METHOD_PUT, _item(network_id, "reservations", view["id"]), json=body)
-        after = [_reservation_view(record) for record in await _read(hass, api, url)]
-        return _result(before, after, _expect_one("update", before, after), False)
+
+    async def async_reserve_ip(call: ServiceCall) -> ServiceResponse:
+        """Pin a device to an IP, or preview the reservation."""
+        entry, runtime, api, network_id, network, snapshot = await _inventory_for(
+            call, required=True
+        )
+        mac = normalize_mac(call.data[ATTR_MAC])
+        if is_private_mac(mac) and not bool(call.data.get(ATTR_FORCE)):
+            raise ServiceValidationError(
+                "Refusing to reserve a private or randomized MAC address; pass force to override"
+            )
+        devices = snapshot["devices"]
+        reservations = snapshot["reservations"]
+        if not snapshot.get("stale"):
+            _store_inventory(runtime, network_id, devices, reservations)
+        device = _find_device(devices, mac)
+        settings = ip_table_settings(entry.options, entry.data)
+        provided = call.data.get(ATTR_IP) if ATTR_IP in call.data else None
+        suggest = bool(call.data.get(ATTR_SUGGEST))
+        current = current_ipv4(device) if device else ""
+        if suggest or (not provided and not current):
+            try:
+                ip = suggest_free_ip(
+                    gateway=_gateway_ip(network),
+                    devices=devices,
+                    reservations=reservations,
+                    node_ips=_node_ips(network),
+                    reservation_range=settings["reservation_range"],
+                )
+            except ValueError as err:
+                raise ServiceValidationError(str(err)) from err
+        elif provided:
+            ip = normalize_ipv4(provided)
+        else:
+            ip = current
+        if ATTR_DESCRIPTION in call.data and str(call.data[ATTR_DESCRIPTION]).strip():
+            description = call.data[ATTR_DESCRIPTION]
+        else:
+            description = default_reservation_description(
+                device, _ha_name_for_mac(collect_ha_records(hass), mac), mac
+            )
+        dry_run = bool(call.data.get(ATTR_DRY_RUN))
+        result = await _async_create_reservation(
+            hass,
+            api,
+            network_id,
+            mac=mac,
+            ip=ip,
+            description=description,
+            dry_run=dry_run,
+        )
+        if not dry_run and isinstance(result, dict):
+            await _refresh_inventory(
+                hass,
+                runtime,
+                api,
+                network_id,
+                _devices_url(network, network_id),
+                fallback_devices=devices,
+                fallback_reservations=result.get("after"),
+            )
+        return result
+
+    async def async_release_ip(call: ServiceCall) -> ServiceResponse:
+        """Delete the reservation for a MAC, or preview it."""
+        _entry, runtime, api, network_id, network, snapshot = await _inventory_for(
+            call, required=True
+        )
+        mac = normalize_mac(call.data[ATTR_MAC])
+        dry_run = bool(call.data.get(ATTR_DRY_RUN))
+        if not snapshot.get("stale"):
+            _store_inventory(
+                runtime, network_id, snapshot["devices"], snapshot["reservations"]
+            )
+        result = await _async_delete_reservation(
+            hass,
+            api,
+            network_id,
+            reservation_id=None,
+            mac=mac,
+            dry_run=dry_run,
+        )
+        if not dry_run and isinstance(result, dict):
+            await _refresh_inventory(
+                hass,
+                runtime,
+                api,
+                network_id,
+                _devices_url(network, network_id),
+                fallback_devices=snapshot["devices"],
+                fallback_reservations=result.get("after"),
+            )
+        return result
+
+    async def _write_nickname(
+        api: Any, network_id: str, device_id: str, nickname: str, mac: str
+    ) -> None:
+        """PUT a nickname on API 2.3 and confirm the read-back. Never retries."""
+        url = _nickname_url(network_id, device_id)
+        await _write(hass, api, METHOD_PUT, url, json={"nickname": nickname})
+        payload = await _call(hass, api, METHOD_GET, url)
+        confirmed = _nickname_text(payload)
+        if confirmed != nickname:
+            raise HomeAssistantError(
+                f"Eero did not confirm the nickname for {mac}; no further requests were made"
+            )
+
+    async def async_sync_names(call: ServiceCall) -> ServiceResponse:
+        """Copy Home Assistant device names onto eero. Writes are one-way."""
+        entry, runtime, api, network_id, network, snapshot = await _inventory_for(
+            call, required=True
+        )
+        if not snapshot.get("stale"):
+            _store_inventory(
+                runtime, network_id, snapshot["devices"], snapshot["reservations"]
+            )
+        dry_run = bool(call.data.get(ATTR_DRY_RUN, True))
+        targets = list(
+            call.data.get(ATTR_TARGETS) or [TARGET_NICKNAME, TARGET_RESERVATION]
+        )
+        prefix_area = call.data.get(ATTR_PREFIX_AREA, PREFIX_WHEN_MISSING)
+        selected = None
+        if ATTR_MACS in call.data and call.data[ATTR_MACS] is not None:
+            selected = {normalize_mac(mac) for mac in call.data[ATTR_MACS]}
+        planned = plan_name_sync(
+            snapshot["devices"],
+            snapshot["reservations"],
+            collect_name_devices(hass),
+            targets=targets,
+            prefix_area=prefix_area,
+            macs=selected,
+        )
+        changes: list[dict[str, Any]] = []
+        for row in planned:
+            public = {
+                "mac": row["mac"],
+                "current_nickname": row["current_nickname"],
+                "current_description": row["current_description"],
+                "proposed_name": row["proposed_name"],
+                "action": row["action"],
+                "result": (
+                    "flagged"
+                    if row["action"] == "flagged"
+                    else "unchanged"
+                    if row["action"] != "update"
+                    else "dry_run"
+                    if dry_run
+                    else "updated"
+                ),
+                "match": row["match"],
+                "ha_device_id": row["ha_device_id"],
+                "reason": row["reason"],
+                "fields": list(row["fields"]),
+            }
+            changes.append(public)
+            if dry_run or row["action"] != "update":
+                continue
+            try:
+                if TARGET_NICKNAME in row["fields"] and row["device_id"]:
+                    await _write_nickname(
+                        api,
+                        network_id,
+                        row["device_id"],
+                        row["proposed_name"],
+                        row["mac"],
+                    )
+                if TARGET_RESERVATION in row["fields"] and row["reservation_id"]:
+                    await _async_update_reservation(
+                        hass,
+                        api,
+                        network_id,
+                        reservation_id=row["reservation_id"],
+                        mac=row["mac"],
+                        ip=None,
+                        description=row["proposed_name"],
+                        dry_run=False,
+                    )
+            except HomeAssistantError:
+                public["result"] = "rejected"
+                raise
+        if not dry_run and any(row["action"] == "update" for row in planned):
+            await _refresh_inventory(
+                hass,
+                runtime,
+                api,
+                network_id,
+                _devices_url(network, network_id),
+                fallback_devices=snapshot["devices"],
+                fallback_reservations=None,
+            )
+        return {
+            "dry_run": dry_run,
+            "network_id": network_id,
+            "config_entry_id": entry.entry_id,
+            "changes": changes,
+            "flagged": [row for row in changes if row["action"] == "flagged"],
+        }
 
     async def async_delete_reservation(call: ServiceCall) -> ServiceResponse:
         """Delete one DHCP reservation without deleting its port forwards."""
         _entry, api, network_id = _context(hass, call)
-        reservation_id = _optional_id(call, ATTR_RESERVATION_ID)
-        mac = normalize_mac(call.data[ATTR_MAC]) if call.data.get(ATTR_MAC) else None
-        if reservation_id is None and mac is None:
-            raise ServiceValidationError("Reservation id or MAC address is required")
-        url = _collection(network_id, "reservations")
-        records = await _read(hass, api, url)
-        _item_raw, view = _match_reservation(
-            records, reservation_id=reservation_id, mac=mac
-        )
-        before = [_reservation_view(record) for record in records]
-        dry_run = bool(call.data[ATTR_DRY_RUN])
-        if dry_run:
-            after = [current for current in before if current["id"] != view["id"]]
-            return _result(before, after, view, True)
-        await _write(
+        return await _async_delete_reservation(
             hass,
             api,
-            METHOD_DELETE,
-            _item(network_id, "reservations", view["id"]),
-            params={"delete_forwards": "false"},
+            network_id,
+            reservation_id=_optional_id(call, ATTR_RESERVATION_ID),
+            mac=call.data.get(ATTR_MAC),
+            dry_run=bool(call.data[ATTR_DRY_RUN]),
         )
-        after = [_reservation_view(record) for record in await _read(hass, api, url)]
-        return _result(before, after, _expect_one("delete", before, after), False)
 
     async def async_list_port_forwards(call: ServiceCall) -> ServiceResponse:
         """Return port forwards for one network."""
@@ -743,6 +1391,30 @@ def async_register_services(hass: HomeAssistant) -> None:
             SERVICE_DELETE_PORT_FORWARD,
             async_delete_port_forward,
             DELETE_PORT_FORWARD_SCHEMA,
+            SupportsResponse.OPTIONAL,
+        ),
+        (
+            SERVICE_IP_TABLE,
+            async_ip_table,
+            IP_TABLE_SCHEMA,
+            SupportsResponse.ONLY,
+        ),
+        (
+            SERVICE_RESERVE_IP,
+            async_reserve_ip,
+            RESERVE_IP_SCHEMA,
+            SupportsResponse.OPTIONAL,
+        ),
+        (
+            SERVICE_RELEASE_IP,
+            async_release_ip,
+            RELEASE_IP_SCHEMA,
+            SupportsResponse.OPTIONAL,
+        ),
+        (
+            SERVICE_SYNC_NAMES,
+            async_sync_names,
+            SYNC_NAMES_SCHEMA,
             SupportsResponse.OPTIONAL,
         ),
     )

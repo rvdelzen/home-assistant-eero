@@ -36,6 +36,8 @@ Custom component to allow control of Eero networks in [Home Assistant](https://h
 - Control backup networks (requires Eero Plus subscription)
 - List, create, update, and delete DHCP reservations
 - List, create, and delete port forwards
+- IP reservation table, pin and release actions, and a bundled Lovelace card
+- One-way name sync from Home Assistant to eero nicknames and reservation descriptions
 - Switch the Eero account on an existing config entry (reconfigure) and sign in again when the session expires (reauthentication)
 
 ## Services
@@ -99,6 +101,53 @@ response_variable: forward
 ```
 
 Delete with `eero.delete_port_forward`, passing `forward_id` or `ip`, `gateway_port`, and `protocol`.
+
+### IP table
+
+Each poll also requests `GET /2.2/networks/{id}/devices` (skipped when that poll already fetched devices for client entities) and `GET /2.2/networks/{id}/reservations`. This is independent of which clients are selected, and it does not create a Home Assistant entity per client. Advanced options can poll this inventory every Nth update (default every poll), choose how many days an offline reservation stays current before it is stale (default 30), limit the free-address search to a CIDR or start-end range, and list the integrations that mark a device as critical.
+
+`eero.ip_table` returns one row per device and per reservation whose MAC is not in the device list. `config_entry_id` is optional when a single Eero entry is loaded. `refresh: true` fetches now; otherwise the last poll is returned. A failed refresh keeps the last good snapshot and is logged once per outage.
+
+```yaml
+action: eero.ip_table
+data:
+  config_entry_id: YOUR_CONFIG_ENTRY_ID
+response_variable: ip_table
+```
+
+`eero.reserve_ip` pins `mac` to `ip`, or to the device's current address when `ip` is omitted. With no current address, or with `suggest: true`, it picks the first address of the largest free block, skipping reservations, current leases, the gateway, addresses ending in `.1`, and eero nodes. The description defaults to the Home Assistant device name, then the eero nickname, then the hostname. A private or randomized MAC is refused unless `force: true`. `eero.release_ip` deletes that MAC's reservation and keeps port forwards. Both accept `dry_run`.
+
+The sensor `sensor.<network>_ip_reservations` reports the number of reservations. Its attributes are only `fixed`, `dynamic`, `mismatch`, `stale`, `critical_unreserved`, and `private_mac_reserved`.
+
+The card is served by the integration (no separate HACS frontend). Add it with:
+
+```yaml
+type: custom:eero-ip-table-card
+config_entry_id: YOUR_CONFIG_ENTRY_ID
+filters:
+  critical: false
+  status: ""
+```
+
+It loads the table on demand and again every 60 seconds from the cached poll. Refresh, pin, and release talk to eero and then reload. Pin uses the current address. Release asks for confirmation first. Critical devices without a reservation are marked in red.
+
+### Sync names
+
+`eero.sync_names` copies Home Assistant names onto eero. It never writes back to Home Assistant. `dry_run` defaults to true. `targets` defaults to `nickname` and `reservation`. `prefix_area` is `when_missing` or `never` (default `when_missing`): the area is added only when the Home Assistant name does not already contain it, and a name that is exactly the area is expanded with the model (`Kitchen` and model `Denon Home Amp` becomes `Kitchen Denon Home Amp`). `macs` limits the diff to those addresses. `config_entry_id` is required.
+
+Matching is by MAC: device-registry connections first, then a MAC embedded in an identifier (Home Connect local, for example), then another device that shares an identifier. A device with a user-given name or an area is preferred. The name is `name_by_user`, otherwise `name`.
+
+A nickname is written with `PUT /2.3/networks/{network_id}/devices/{device_id}` and `{"nickname": ...}`. The 2.2 devices resource drops that write. A reservation description uses the existing reservation update. Each write is read back once and is not retried. Unmatched devices, private or random MACs, unnamed Home Assistant devices, and duplicate target names are returned under `flagged` and are not written. The response lists, per MAC, the current nickname, current description, proposed name, action, and result.
+
+The card's **Sync names** button runs the dry run, shows that diff, and writes only after confirmation.
+
+```yaml
+action: eero.sync_names
+data:
+  config_entry_id: YOUR_CONFIG_ENTRY_ID
+  dry_run: true
+response_variable: names
+```
 
 ### Reconfigure and reauthentication
 Use **Reconfigure** on the config entry to sign the same entry into a different Eero account (email or phone, then the verification code). The entry id, devices, and entity ids stay the same. When a saved session is rejected and refresh fails, Home Assistant starts the reauthentication flow for that same entry. An account that is already set up on another entry is refused.

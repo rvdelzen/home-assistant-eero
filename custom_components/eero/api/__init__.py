@@ -9,6 +9,7 @@ import logging
 from pathlib import Path
 import re
 from typing import Any
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import aiofiles
@@ -92,6 +93,7 @@ class EeroException(Exception):
         message: str | None = None,
         payload: str | None = None,
         server_time: str | None = None,
+        quiet: bool = False,
     ) -> None:
         """Initialize."""
         super().__init__()
@@ -111,7 +113,8 @@ class EeroException(Exception):
             exception = f"{exception}\n- Payload: {redact_secrets(self.payload)}"
         if self.server_time:
             exception = f"{exception}\n- Server time: {self.server_time}"
-        _LOGGER.warning(exception)
+        if not quiet:
+            _LOGGER.warning(exception)
 
 
 class EeroAuthException(EeroException):
@@ -139,6 +142,9 @@ class EeroAPI:
         self._on_user_token = on_user_token
         self._on_auth_failed = on_auth_failed
         self._refresh_in_progress = False
+        self._ip_inventory: dict[str, dict[str, list]] = {}
+        self._ip_failed: set[str] = set()
+        self._ip_poll_index = 0
         if self.show_eero_logo is None:
             self.show_eero_logo = {}
 
@@ -168,13 +174,14 @@ class EeroAPI:
             "error.session.refresh",
         }
 
-    def _http_error(self, response: requests.Response) -> EeroException:
+    def _http_error(self, response: requests.Response, quiet: bool = False) -> EeroException:
         """Build an exception for a non-success response."""
         return EeroException(
             code=response.status_code,
             error=response.reason,
             message=f"Bad response received from URL: {response.url}",
             payload=redact_secrets(response.text, self.user_token),
+            quiet=quiet,
         )
 
     @property
@@ -193,6 +200,7 @@ class EeroAPI:
         Writes pass ``allow_refresh=False`` so a failed request is not repeated.
         """
         allow_refresh = kwargs.pop("allow_refresh", True)
+        quiet = kwargs.pop("quiet", False)
         if method not in [METHOD_DELETE, METHOD_GET, METHOD_POST, METHOD_PUT]:
             return None
         _LOGGER.debug("Calling API with method: %s and URL: %s", method, url)
@@ -207,6 +215,7 @@ class EeroAPI:
                 url=f"{API_ENDPOINT}{url}", cookies=self.cookie, **kwargs
             ),
             allow_refresh=allow_refresh,
+            quiet=quiet,
         )
         self.save_response(
             response=redact_data(response, self.user_token),
@@ -309,7 +318,9 @@ class EeroAPI:
             self._set_user_token(response["user_token"])
         return response
 
-    def decode_json(self, response: requests.Response) -> dict[str, Any]:
+    def decode_json(
+        self, response: requests.Response, quiet: bool = False
+    ) -> dict[str, Any]:
         """Decode JSON."""
         try:
             return json.loads(response.text)
@@ -319,10 +330,11 @@ class EeroAPI:
                 error=response.reason,
                 message="Unable to decode JSON",
                 payload=redact_secrets(response.text, self.user_token),
+                quiet=quiet,
             ) from exception
 
     def parse_response(
-        self, function: Callable, allow_refresh: bool = True
+        self, function: Callable, allow_refresh: bool = True, quiet: bool = False
     ) -> dict[str, Any] | list[Any] | None:
         """Parse response.
 
@@ -330,9 +342,9 @@ class EeroAPI:
         once. The refresh request itself, and callers that pass
         ``allow_refresh=False``, are never retried.
         """
-        response = self.timeout(function)
+        response = self.timeout(function, quiet=quiet)
         if not response.ok:
-            text = self.decode_json(response)
+            text = self.decode_json(response, quiet=quiet)
             if self._session_rejected(text):
                 _LOGGER.debug("Session has expired and is invalid")
                 if allow_refresh and not self._refresh_in_progress:
@@ -350,9 +362,9 @@ class EeroAPI:
                         ) from err
                     finally:
                         self._refresh_in_progress = False
-                    response = self.timeout(function)
+                    response = self.timeout(function, quiet=quiet)
                     if not response.ok:
-                        text = self.decode_json(response)
+                        text = self.decode_json(response, quiet=quiet)
                         if self._session_rejected(text):
                             self._notify_auth_failed()
                             raise EeroAuthException(
@@ -361,7 +373,7 @@ class EeroAPI:
                                 message="Session rejected after refresh",
                                 payload=redact_secrets(response.text, self.user_token),
                             )
-                        raise self._http_error(response)
+                        raise self._http_error(response, quiet=quiet)
                 else:
                     # The refresh request runs with a refresh already in
                     # progress. Only the outer caller reports auth failure,
@@ -375,17 +387,18 @@ class EeroAPI:
                         payload=redact_secrets(response.text, self.user_token),
                     )
             else:
-                raise self._http_error(response)
-        text = self.decode_json(response)
+                raise self._http_error(response, quiet=quiet)
+        text = self.decode_json(response, quiet=quiet)
         return text.get("data")
 
-    def timeout(self, function: Callable) -> requests.Response:
+    def timeout(self, function: Callable, quiet: bool = False) -> requests.Response:
         """Timeout."""
         try:
             return function()
         except requests.exceptions.Timeout as exception:
             raise EeroException(
                 message="Request timed out",
+                quiet=quiet,
             ) from exception
 
     def save_response(self, response: Any, name: str = "response") -> None:
@@ -410,10 +423,17 @@ class EeroAPI:
     def update(
         self,
         config: dict[str, EeroUpdateConfig] | None = None,
+        ip_table_every: int = 1,
     ) -> EeroAccount:
         """Update."""
         if config is None:
             config = {}
+        try:
+            every = max(1, int(ip_table_every))
+        except (TypeError, ValueError):
+            every = 1
+        self._ip_poll_index += 1
+        fetch_inventory = ((self._ip_poll_index - 1) % every) == 0
         try:
             account = self.call(method=METHOD_GET, url=URL_ACCOUNT)
             networks = []
@@ -527,6 +547,9 @@ class EeroAPI:
                                     )
                                 )
                     network_data["activity"] = activity_data
+                    self._attach_ip_inventory(
+                        network_id, network_data, fetch=fetch_inventory
+                    )
                     networks.append(network_data)
             account["networks"]["data"] = networks
             self.save_response(response=redact_data(account, self.user_token), name="update_data")
@@ -584,6 +607,122 @@ class EeroAPI:
             json=json_data,
         )
         return data.get("insights", data.get("series", data.get("values")))
+
+    def remember_ip_inventory(
+        self, network_id: str, devices: list, reservations: list
+    ) -> None:
+        """Remember a devices and reservations snapshot for a later poll."""
+        self._ip_inventory[str(network_id)] = {
+            "devices": list(devices),
+            "reservations": list(reservations),
+        }
+        self._ip_failed.discard(str(network_id))
+
+    def fetch_ip_inventory(
+        self,
+        network_id: str,
+        devices_url: str | None = None,
+        *,
+        required: bool = False,
+    ) -> dict[str, Any]:
+        """Fetch devices and reservations for one network.
+
+        A failed optional fetch keeps the last good snapshot. ``required``
+        raises instead of returning that snapshot. Session rejection is never
+        swallowed.
+        """
+        network_data: dict[str, Any] = {}
+        if devices_url:
+            network_data["resources"] = {"devices": devices_url}
+        self._attach_ip_inventory(
+            str(network_id), network_data, fetch=True, required=required
+        )
+        if "ip_devices" not in network_data:
+            raise EeroException(
+                message="Could not load the device list",
+                quiet=True,
+            )
+        return {
+            "devices": list(network_data.get("ip_devices") or []),
+            "reservations": list(network_data.get("ip_reservations") or []),
+            "stale": bool(network_data.get("ip_inventory_stale")),
+        }
+
+    def _inventory_list(self, payload: Any) -> list:
+        """Return a list of records from an inventory response."""
+        if payload is None:
+            return []
+        if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+            payload = payload["data"]
+        if isinstance(payload, list) and all(isinstance(item, dict) for item in payload):
+            return payload
+        raise EeroException(message="Unexpected device or reservation list", quiet=True)
+
+    def _log_ip_failure(self, network_id: str, err: EeroException) -> None:
+        """Log an inventory failure once per outage, without the response body."""
+        if network_id in self._ip_failed:
+            return
+        self._ip_failed.add(network_id)
+        _LOGGER.warning(
+            "Could not refresh devices and reservations for network %s; keeping the last good data (%s)",
+            network_id,
+            err.error or err.message or "request failed",
+        )
+
+    def _attach_ip_inventory(
+        self,
+        network_id: str,
+        network_data: dict[str, Any],
+        *,
+        fetch: bool,
+        required: bool = False,
+    ) -> None:
+        """Copy devices and reservations onto a network payload.
+
+        This is independent of ``get_devices``. Client entities still follow
+        ``client_allowed`` and are not created from this list.
+        """
+        cached = self._ip_inventory.get(network_id)
+        if not fetch and cached:
+            network_data["ip_devices"] = list(cached["devices"])
+            network_data["ip_reservations"] = list(cached["reservations"])
+            network_data["ip_inventory_stale"] = False
+            return
+        devices_url = (network_data.get("resources") or {}).get(
+            "devices"
+        ) or f"/2.2/networks/{quote(str(network_id), safe='')}/devices"
+        reservations_url = (
+            f"/2.2/networks/{quote(str(network_id), safe='')}/reservations"
+        )
+        try:
+            existing = network_data.get("devices")
+            if isinstance(existing, dict) and isinstance(existing.get("data"), list):
+                devices = self._inventory_list(existing["data"])
+            else:
+                devices = self._inventory_list(
+                    self.call(method=METHOD_GET, url=devices_url, quiet=True)
+                )
+            reservations = self._inventory_list(
+                self.call(method=METHOD_GET, url=reservations_url, quiet=True)
+            )
+        except EeroAuthException:
+            raise
+        except EeroException as err:
+            self._log_ip_failure(network_id, err)
+            if required:
+                raise
+            if cached:
+                network_data["ip_devices"] = list(cached["devices"])
+                network_data["ip_reservations"] = list(cached["reservations"])
+            else:
+                network_data["ip_devices"] = []
+                network_data["ip_reservations"] = []
+            network_data["ip_inventory_stale"] = True
+            return
+        self.remember_ip_inventory(network_id, devices, reservations)
+        network_data["ip_devices"] = list(devices)
+        network_data["ip_reservations"] = list(reservations)
+        network_data["ip_inventory_stale"] = False
 
 
 class EeroUpdateConfig:
