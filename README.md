@@ -129,7 +129,7 @@ filters:
   status: ""
 ```
 
-It loads the table on demand and again every 60 seconds from the cached poll. Refresh, pin, and release talk to eero and then reload. Pin uses the current address. Release asks for confirmation first. Critical devices without a reservation are marked in red.
+It loads the table on demand and again every 60 seconds from the cached poll. Refresh, pin, and release talk to eero and then reload. Pin uses the current address. Release asks for confirmation first. Critical devices without a reservation are marked in red. The card is served at `/eero/ip-table-card.js`. A failed call shows the error and leaves the last table on screen.
 
 ### Sync names
 

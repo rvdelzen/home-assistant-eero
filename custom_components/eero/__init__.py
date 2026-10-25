@@ -87,7 +87,7 @@ from .const import (
     SERVICE_SET_BLOCKED_APPS,
 )
 from .frontend import async_register_frontend
-from .ip_table import ip_table_settings
+from .ip_table import ip_table_settings, lookup_device_by_identifier
 from .services import async_register_services, async_unload_services
 
 SET_BLOCKED_APPS_SCHEMA = vol.Schema(
@@ -780,8 +780,11 @@ class EeroEntity(CoordinatorEntity):
         """
         if self.hass is None or self.network is None:
             return None
-        device = dr.async_get(self.hass).async_get_device(
-            identifiers={(DOMAIN, self.network.id)}
+        entry = getattr(self.coordinator, "config_entry", None)
+        device = lookup_device_by_identifier(
+            dr.async_get(self.hass),
+            (DOMAIN, self.network.id),
+            getattr(entry, "entry_id", None),
         )
         return device.id if device else None
 
