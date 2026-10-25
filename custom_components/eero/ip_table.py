@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import ipaddress
+import itertools
 import re
 from typing import Any
 
@@ -236,6 +237,57 @@ def default_reservation_description(
     return _text(ha_name) or nickname or hostname or mac
 
 
+_MISSING = object()
+
+
+def iter_device_entries(registry: Any) -> Any:
+    """Yield device entries.
+
+    Home Assistant 2026.8+ makes ``registry.devices`` iterate entries, and
+    using it as a mapping (``.values()``, ``.get()``) warns until 2027.9.
+    Older cores store a mapping whose iteration yields device ids.
+    """
+    devices = registry.devices
+    if isinstance(devices, dict):
+        return iter(devices.values())
+    iterator = iter(devices)
+    try:
+        first = next(iterator)
+    except StopIteration:
+        return iter(())
+    if isinstance(first, str):
+        return iter(devices.values())
+    return itertools.chain((first,), iterator)
+
+
+def device_config_entry_ids(device: Any) -> list[str]:
+    """Return the config entry ids that own a device.
+
+    ``config_entry_id`` is the single owner from Home Assistant 2026.8.
+    Reading ``config_entries`` warns on 2026.10 and stops working in 2027.10,
+    so it is only used when the new attribute is absent.
+    """
+    single = getattr(device, "config_entry_id", _MISSING)
+    if single is not _MISSING:
+        return [str(single)] if single else []
+    entries = getattr(device, "config_entries", ()) or ()
+    return [str(entry_id) for entry_id in entries if entry_id]
+
+
+def lookup_device_by_identifier(
+    registry: Any, identifier: tuple[str, str], config_entry_id: str | None
+) -> Any:
+    """Find one device by identifier, scoped to its config entry when possible.
+
+    ``async_get_device`` is ambiguous once identifiers are per config entry
+    and is removed in Home Assistant 2027.8.
+    """
+    scoped = getattr(registry, "async_get_device_by_identifier", None)
+    if scoped is not None and config_entry_id:
+        return scoped(identifier, config_entry_id)
+    return registry.async_get_device(identifiers={identifier})
+
+
 def registry_mac_records(devices: Any, domain_for: Any) -> list[dict[str, Any]]:
     """Index device-registry entries by connection MAC.
 
@@ -257,7 +309,7 @@ def registry_mac_records(devices: Any, domain_for: Any) -> list[dict[str, Any]]:
         if not macs:
             continue
         integrations: list[str] = []
-        for entry_id in getattr(device, "config_entries", ()) or ():
+        for entry_id in device_config_entry_ids(device):
             domain = domain_for(entry_id)
             if domain and domain not in integrations:
                 integrations.append(domain)

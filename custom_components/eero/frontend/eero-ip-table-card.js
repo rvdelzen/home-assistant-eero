@@ -61,20 +61,51 @@ class EeroIpTableCard extends HTMLElement {
     return 6;
   }
 
+  _errorText(err) {
+    if (!err) {
+      return "Eero request failed";
+    }
+    if (typeof err === "string") {
+      return err;
+    }
+    if (err.message) {
+      return err.message;
+    }
+    if (err.body && err.body.message) {
+      return err.body.message;
+    }
+    return String(err);
+  }
+
   async _service(name, data) {
     const payload = { ...data };
     if (this._entryId) {
       payload.config_entry_id = this._entryId;
     }
-    const result = await this._hass.callService("eero", name, payload, {}, true);
-    if (
-      result &&
-      typeof result === "object" &&
-      result.response &&
-      !result.devices &&
-      !result.changes &&
-      !result.before
-    ) {
+    // ip_table is SupportsResponse.ONLY. reserve_ip, release_ip, and
+    // sync_names are OPTIONAL. All four return data, so every call asks
+    // for it. The 5th callService argument is notifyOnError, not the
+    // response flag; the response flag is the 6th argument.
+    let result;
+    if (typeof this._hass.callWS === "function") {
+      result = await this._hass.callWS({
+        type: "call_service",
+        domain: "eero",
+        service: name,
+        service_data: payload,
+        return_response: true,
+      });
+    } else {
+      result = await this._hass.callService(
+        "eero",
+        name,
+        payload,
+        undefined,
+        false,
+        true
+      );
+    }
+    if (result && typeof result === "object" && result.response) {
       return result.response;
     }
     return result || {};
@@ -88,14 +119,17 @@ class EeroIpTableCard extends HTMLElement {
     this._render();
     try {
       const table = await this._service("ip_table", { refresh: Boolean(refresh) });
-      this._rows = table.devices || [];
+      if (!table || !Array.isArray(table.devices)) {
+        throw new Error("Eero did not return an IP table");
+      }
+      this._rows = table.devices;
       this._summary = table.summary || {};
       if (table.config_entry_id) {
         this._entryId = table.config_entry_id;
       }
       this._error = "";
     } catch (err) {
-      this._error = (err && err.message) || String(err);
+      this._error = this._errorText(err);
     } finally {
       this._busy = false;
       this._render();
@@ -114,7 +148,7 @@ class EeroIpTableCard extends HTMLElement {
       await this._service("reserve_ip", data);
       await this._load(true);
     } catch (err) {
-      this._error = (err && err.message) || String(err);
+      this._error = this._errorText(err);
       this._render();
     }
   }
@@ -129,7 +163,7 @@ class EeroIpTableCard extends HTMLElement {
       await this._service("release_ip", { mac: row.mac });
       await this._load(true);
     } catch (err) {
-      this._error = (err && err.message) || String(err);
+      this._error = this._errorText(err);
       this._render();
     }
   }
@@ -182,7 +216,7 @@ class EeroIpTableCard extends HTMLElement {
       });
       await this._load(true);
     } catch (err) {
-      this._error = (err && err.message) || String(err);
+      this._error = this._errorText(err);
       this._render();
     } finally {
       this._busy = false;
@@ -283,9 +317,8 @@ class EeroIpTableCard extends HTMLElement {
     const summary = this._summary || {};
     const summaryLine = document.createElement("div");
     summaryLine.className = "summary";
-    summaryLine.textContent = this._busy
-      ? "Loading…"
-      : `${summary.reservations || 0} reserved · ${summary.dynamic || 0} dynamic · ${summary.fixed_mismatch || 0} mismatch · ${summary.stale_reservation || 0} stale · ${summary.critical_unreserved || 0} critical without a reservation`;
+    const counts = `${summary.reservations || 0} reserved · ${summary.dynamic || 0} dynamic · ${summary.fixed_mismatch || 0} mismatch · ${summary.stale_reservation || 0} stale · ${summary.critical_unreserved || 0} critical without a reservation`;
+    summaryLine.textContent = this._busy && !this._rows.length ? "Loading…" : counts;
     body.append(summaryLine);
 
     const toolbar = document.createElement("div");

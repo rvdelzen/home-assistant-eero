@@ -77,6 +77,7 @@ from .ip_table import (
     default_reservation_description,
     ip_table_settings,
     is_private_mac,
+    iter_device_entries,
     mac_key,
     registry_mac_records,
     suggest_free_ip,
@@ -600,7 +601,7 @@ def collect_ha_records(hass: HomeAssistant) -> list[dict[str, Any]]:
             return None
         return entry.domain
 
-    return registry_mac_records(registry.devices.values(), domain_for)
+    return registry_mac_records(iter_device_entries(registry), domain_for)
 
 
 def _loaded_entry_ids(hass: HomeAssistant) -> list[str]:
@@ -886,7 +887,7 @@ def collect_name_devices(hass: HomeAssistant) -> list[dict[str, Any]]:
     registry = dr.async_get(hass)
     areas = ar.async_get(hass)
     devices: list[dict[str, Any]] = []
-    for device in registry.devices.values():
+    for device in iter_device_entries(registry):
         area = areas.async_get_area(device.area_id) if device.area_id else None
         devices.append(
             {
