@@ -47,7 +47,7 @@ class RoutingSession:
         elif path.rstrip("/").endswith("/net-1"):
             data = {
                 "url": "/2.2/networks/net-1",
-                "name": "Ohana",
+                "name": "Home",
                 "resources": {
                     "thread": "/2.2/networks/net-1/thread",
                     "devices": "/2.2/networks/net-1/devices",

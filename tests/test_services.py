@@ -127,7 +127,7 @@ def api(hass):
         DATA_COORDINATOR: SimpleNamespace(
             data=SimpleNamespace(
                 networks=[
-                    SimpleNamespace(id="net-1", name="Ohana", name_unique="Ohana"),
+                    SimpleNamespace(id="net-1", name="Home", name_unique="Home"),
                     SimpleNamespace(id="net-2", name="Guest", name_unique="Guest"),
                 ]
             )
@@ -183,7 +183,7 @@ async def test_list_reservations_returns_normalized_records(hass, api) -> None:
     response = await _call(
         hass,
         SERVICE_LIST_RESERVATIONS,
-        {ATTR_CONFIG_ENTRY_ID: entry.entry_id, ATTR_NETWORK: "Ohana"},
+        {ATTR_CONFIG_ENTRY_ID: entry.entry_id, ATTR_NETWORK: "Home"},
     )
 
     assert response == {

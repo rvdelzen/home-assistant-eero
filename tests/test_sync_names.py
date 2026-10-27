@@ -257,7 +257,7 @@ def names(hass):
         DATA_API: client,
         DATA_COORDINATOR: SimpleNamespace(
             data=SimpleNamespace(
-                networks=[SimpleNamespace(id="net-1", name="Ohana", name_unique="Ohana")]
+                networks=[SimpleNamespace(id="net-1", name="Home", name_unique="Home")]
             )
         ),
     }

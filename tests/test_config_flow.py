@@ -79,7 +79,7 @@ async def test_reconfigure_keeps_entry_id_devices_and_resources(hass, caplog) ->
     device = dr.async_get(hass).async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, "net-1")},
-        name="Ohana",
+        name="Home",
     )
 
     with caplog.at_level(logging.DEBUG), patch(

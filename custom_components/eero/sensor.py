@@ -525,7 +525,7 @@ class EeroIpReservationSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def name(self) -> str:
-        """Return the entity name, for example Ohana IP Reservations."""
+        """Return the entity name, for example Home IP Reservations."""
         network = self.network
         base = getattr(network, "name", None) or "Eero"
         return f"{base} IP Reservations"

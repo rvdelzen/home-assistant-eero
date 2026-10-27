@@ -78,8 +78,8 @@ def _install(hass, *entry_ids: str):
         client = InventoryAPI()
         network = SimpleNamespace(
             id=f"net-{index}",
-            name="Ohana" if index == 1 else "Guest",
-            name_unique="Ohana" if index == 1 else "Guest",
+            name="Home" if index == 1 else "Guest",
+            name_unique="Home" if index == 1 else "Guest",
             data={
                 "gateway_ip": "192.168.4.1",
                 "eeros": {"data": [{"gateway": True, "ip_address": "192.168.4.1"}]},
@@ -146,7 +146,7 @@ async def test_ip_table_single_entry_and_critical_match(hass) -> None:
     sensor.coordinator = hass.data[DOMAIN][entry.entry_id][DATA_COORDINATOR]
     assert sensor.native_value == 0
     assert sensor.extra_state_attributes["critical_unreserved"] == 1
-    assert sensor.name == "Ohana IP Reservations"
+    assert sensor.name == "Home IP Reservations"
 
 
 async def test_ip_table_requires_an_entry_when_several_are_loaded(hass) -> None:
